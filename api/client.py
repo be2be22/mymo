@@ -266,7 +266,13 @@ class HttpClient:
         await self._respect_rate_limit()
         assert self._retry_client is not None
 
-        logger.debug("GET {}", url)
+        # Log cookies being sent for mymoviz.co requests (debug)
+        if "mymoviz.co" in url:
+            cookies_str = self.get_cookie_string()
+            logger.info("GET {} | cookies='{}'", url, cookies_str[:100] if cookies_str else "(none)")
+        else:
+            logger.debug("GET {}", url)
+
         async with self._retry_client.get(url, **kwargs) as resp:
             if resp.status >= 400:
                 logger.warning("HTTP {} for {}", resp.status, url)
