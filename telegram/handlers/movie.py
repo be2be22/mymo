@@ -34,13 +34,15 @@ router = Router(name="movie")
 
 # ----------------------------------------------------------------------
 # Detail callback: detail:<content_type>:<mymoviz_id>
+# NOTE: mymoviz_id may contain ":" (e.g. "The-Bad-Guys:-Breaking-In-2025")
+# so we split with maxsplit=2 to keep the rest intact.
 # ----------------------------------------------------------------------
 @router.callback_query(lambda c: c.data and c.data.startswith("detail:"))
 async def cb_detail(
     callback: CallbackQuery, session: AsyncSession, db_user: User
 ) -> None:
     """Open the detail page for a movie or series."""
-    parts = callback.data.split(":")
+    parts = callback.data.split(":", 2)
     if len(parts) < 3:
         await callback.answer("❌ داده نامعتبر است.", show_alert=True)
         return
@@ -218,13 +220,14 @@ async def _render_detail(
 
 # ----------------------------------------------------------------------
 # Favorite callback: fav:<content_type>:<mymoviz_id>
+# NOTE: split with maxsplit=2 because mymoviz_id may contain ":"
 # ----------------------------------------------------------------------
 @router.callback_query(lambda c: c.data and c.data.startswith("fav:"))
 async def cb_favorite(
     callback: CallbackQuery, session: AsyncSession, db_user: User
 ) -> None:
     """Toggle favorite status for a content item."""
-    parts = callback.data.split(":")
+    parts = callback.data.split(":", 2)
     if len(parts) < 3:
         await callback.answer("❌ داده نامعتبر است.", show_alert=True)
         return
@@ -265,13 +268,14 @@ async def cb_favorite(
 
 # ----------------------------------------------------------------------
 # Subscription callback: sub:<content_type>:<mymoviz_id>
+# NOTE: split with maxsplit=2 because mymoviz_id may contain ":"
 # ----------------------------------------------------------------------
 @router.callback_query(lambda c: c.data and c.data.startswith("sub:"))
 async def cb_subscribe(
     callback: CallbackQuery, session: AsyncSession, db_user: User
 ) -> None:
     """Toggle subscription for a content item."""
-    parts = callback.data.split(":")
+    parts = callback.data.split(":", 2)
     if len(parts) < 3:
         await callback.answer("❌ داده نامعتبر است.", show_alert=True)
         return
@@ -393,7 +397,7 @@ async def cb_subscriptions_list(
 @router.callback_query(lambda c: c.data and c.data.startswith("dl:"))
 async def cb_download(callback: CallbackQuery, session: AsyncSession) -> None:
     """Show download links (links to site)."""
-    parts = callback.data.split(":")
+    parts = callback.data.split(":", 2)
     if len(parts) < 3:
         await callback.answer("❌ داده نامعتبر است.", show_alert=True)
         return

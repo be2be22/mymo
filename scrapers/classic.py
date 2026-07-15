@@ -261,16 +261,27 @@ class ClassicScraper(BaseScraper):
 
         # ----- Title -----
         # MyMoviz uses h1 for English title, h1.movie-titlep for Persian page title
+        # H1 typically looks like "Inception (2010)" for movies,
+        # or "Breaking Bad (2008 –    )" for series (with end-year placeholder)
         h1 = soup.select_one("h1")
         if h1:
-            # Get English title from the main h1 (contains title + (year))
             h1_text = h1.get_text(" ", strip=True)
+            # Try movie-style year first: "(2010)"
             year_match = re.search(r"\(\s*(\d{4})\s*\)", h1_text)
             if year_match:
                 detail.year = int(year_match.group(1))
                 detail.title_en = re.sub(r"\(\s*\d{4}\s*\)", "", h1_text).strip()
             else:
-                detail.title_en = h1_text
+                # Try series-style year: "Breaking Bad (2008 –    )" -> 2008
+                series_year_match = re.search(r"\(\s*(\d{4})\s*[–\-]", h1_text)
+                if series_year_match:
+                    detail.year = int(series_year_match.group(1))
+                    # Strip the "(2008 –    )" part
+                    detail.title_en = re.sub(
+                        r"\(\s*\d{4}\s*[–\-][^)]*\)", "", h1_text
+                    ).strip()
+                else:
+                    detail.title_en = h1_text
 
         # Persian title is in the <title> tag or h1.movie-titlep
         title_p = soup.select_one("h1.movie-titlep")
@@ -369,10 +380,22 @@ class ClassicScraper(BaseScraper):
                 detail.duration = dur_match2.group(1)
 
         # ----- Year -----
-        if detail.year is None:
-            year_match = re.search(r"\(\s*(\d{4})\s*\)", text)
-            if year_match:
-                detail.year = int(year_match.group(1))
+        # Fallback: if year is None or unreasonable (e.g. > 2026 or < 1900),
+        # try to extract from URL slug (e.g. /tt903747/Breaking-Bad-2008 -> 2008)
+        if detail.year is None or detail.year > 2026 or detail.year < 1900:
+            # Try URL first - most reliable
+            url_year_match = re.search(r"-(\d{4})(?:$|/|\?)", url)
+            if url_year_match:
+                url_year = int(url_year_match.group(1))
+                if 1900 <= url_year <= 2026:
+                    detail.year = url_year
+            # If still not found, try the page text
+            if detail.year is None or detail.year > 2026 or detail.year < 1900:
+                year_match = re.search(r"\(\s*(\d{4})\s*\)", text)
+                if year_match:
+                    candidate = int(year_match.group(1))
+                    if 1900 <= candidate <= 2026:
+                        detail.year = candidate
 
         # ----- IMDb rating -----
         # Rating is in div.-rating-rating with text like "8.8 /10 2114567 users"
