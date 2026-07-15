@@ -6,19 +6,12 @@
   },
   "deploy": {
     "startCommand": "python main.py",
-    "healthcheckPath": "/",
-    "healthcheckTimeout": 60,
     "restartPolicyType": "ON_FAILURE",
-    "restartPolicyMaxRetries": 5,
+    "restartPolicyMaxRetries": 10,
+    "sleepApplication": false,
     "env": {
       "PYTHONUNBUFFERED": "1",
       "PYTHONDONTWRITEBYTECODE": "1"
-    }
-  },
-  "environments": {
-    "production": {
-      "healthcheckPath": "/",
-      "port": "$PORT"
     }
   }
 }

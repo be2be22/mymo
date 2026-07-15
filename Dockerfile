@@ -66,10 +66,6 @@ RUN mkdir -p /app/data /app/logs
 # Expose webhook port (Railway/production)
 EXPOSE 8443
 
-# Healthcheck: simple process check
-HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
-    CMD python -c "import os; os.path.exists('/app/data/mymoviz.db')" || exit 1
-
 # Use a non-root user for security
 RUN useradd -m -u 1000 botuser && chown -R botuser:botuser /app
 USER botuser
