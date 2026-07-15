@@ -163,6 +163,11 @@ class HttpClient:
 
         login_url = f"{settings.classic_base_url}/signin"
 
+        # Use curl_cffi for login flow if available (better Cloudflare bypass)
+        if _HAS_CFFI:
+            logger.info("Using curl_cffi for MyMoviz login flow")
+            return await self._cffi_login(login_url)
+
         # Step 1: GET the signin page to fetch the CSRF token
         try:
             logger.info("Fetching MyMoviz signin page for CSRF token: {}", login_url)
@@ -283,58 +288,140 @@ class HttpClient:
             self._last_request_at = asyncio.get_event_loop().time()
 
     # ------------------------------------------------------------------
+    # curl_cffi login (Cloudflare-safe)
+    # ------------------------------------------------------------------
+    async def _cffi_login(self, login_url: str) -> bool:
+        """Login to MyMoviz using curl_cffi (Chrome impersonation).
+
+        curl_cffi maintains its own cookie jar, separate from aiohttp's.
+        After a successful login, we extract the cookies and inject them
+        into aiohttp's cookie jar so subsequent aiohttp requests carry them.
+        """
+        import re
+
+        def _do_login() -> tuple[bool, dict, str]:
+            try:
+                # Use a fresh session with curl_cffi
+                sess = cffi_requests.Session(impersonate="chrome120")
+
+                # Step 1: GET /signin to get CSRF
+                r1 = sess.get(login_url, timeout=settings.request_timeout)
+                logger.info(
+                    "cffi GET /signin: status={}, size={}", r1.status_code, len(r1.text) if r1.text else 0,
+                )
+                csrf_match = re.search(r'name="_csrf"\s+value="([^"]+)"', r1.text or "")
+                if not csrf_match:
+                    logger.warning("CSRF token not found via curl_cffi")
+                    return False, {}, ""
+                csrf = csrf_match.group(1)
+
+                # Step 2: POST login
+                r2 = sess.post(
+                    login_url,
+                    data={
+                        "_csrf": csrf,
+                        "email": settings.mymoviz_email,
+                        "password": settings.mymoviz_password,
+                        "random_param": "1",
+                        "capcode": "",
+                    },
+                    timeout=settings.request_timeout,
+                    allow_redirects=True,
+                )
+                text = r2.text or ""
+                logger.info(
+                    "cffi POST /signin: status={}, size={}, has_logout='{}'",
+                    r2.status_code, len(text), "خروج" in text,
+                )
+
+                # Capture cookies from curl_cffi session
+                cookies_dict: dict[str, str] = {}
+                for c in sess.cookies.jar:
+                    cookies_dict[c.name] = c.value
+
+                # Check success
+                is_logged_in = (
+                    "خروج" in text
+                    or "/signout" in text
+                    or "/panel/" in text
+                    or "panel/watchlist" in text
+                )
+                is_signin_form = "capcode" in text or len(text) < 15000
+                success = is_logged_in and not is_signin_form
+                return success, cookies_dict, text
+            except Exception as exc:
+                logger.warning("curl_cffi login failed: {}", exc)
+                return False, {}, ""
+
+        success, cookies_dict, text = await asyncio.get_event_loop().run_in_executor(
+            None, _do_login
+        )
+
+        if success:
+            logger.info("✅ MyMoviz login succeeded via curl_cffi!")
+            logger.info("Cookies obtained: {}", list(cookies_dict.keys()))
+            # Inject cookies into aiohttp's cookie jar so aiohttp requests use them
+            if self._cookie_jar is not None:
+                from yarl import URL
+                for name, value in cookies_dict.items():
+                    # Use SimpleCookie to set the cookie properly
+                    morsel_data = f"{name}={value}; Path=/; Domain=mymoviz.co"
+                    self._cookie_jar.update_cookies(
+                        {name: value}, response_url=URL("https://mymoviz.co/")
+                    )
+                # Verify
+                logger.info("Cookie jar after injection: {}", self.get_cookie_string()[:200])
+            return True
+
+        logger.warning(
+            "❌ MyMoviz login FAILED via curl_cffi (likely CAPTCHA). "
+            "Set MYMOVIZ_COOKIE env var manually."
+        )
+        return False
+
+    # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
     async def get(self, url: str, **kwargs: Any) -> str:
         """Perform a GET request with retry; return response text.
 
-        Uses aiohttp first. If the response looks like a Cloudflare anti-bot
-        block (small page with "Error 404" or similar), falls back to
-        curl_cffi which impersonates Chrome and can bypass the block.
-
-        Raises:
-            aiohttp.ClientError: if all retries are exhausted.
-            asyncio.TimeoutError: on persistent timeouts.
+        For mymoviz.co URLs, uses curl_cffi directly (Chrome impersonation)
+        to bypass Cloudflare anti-bot detection on datacenter IPs.
+        For other URLs, uses aiohttp with retry.
         """
         await self.init()
         await self._respect_rate_limit()
-        assert self._retry_client is not None
 
         # Log cookies being sent for mymoviz.co requests (debug)
+        cookies_str = self.get_cookie_string()
         if "mymoviz.co" in url:
-            cookies_str = self.get_cookie_string()
             logger.info("GET {} | cookies='{}'", url, cookies_str[:100] if cookies_str else "(none)")
-        else:
-            logger.debug("GET {}", url)
 
+        # For mymoviz.co, try curl_cffi FIRST (it can bypass Cloudflare)
+        # then fall back to aiohttp if curl_cffi is unavailable.
+        if "mymoviz.co" in url and _HAS_CFFI:
+            text = await self._cffi_get(url)
+            if text and len(text) > 20000:
+                # Check it's not a block page
+                if "Error 404" not in text or "Page not found" not in text[:5000]:
+                    logger.info("curl_cffi OK: {} bytes from {}", len(text), url)
+                    return text
+                logger.warning(
+                    "curl_cffi got block page ({} bytes) - trying aiohttp", len(text),
+                )
+            elif text:
+                logger.warning(
+                    "curl_cffi got small response ({} bytes) - trying aiohttp", len(text),
+                )
+
+        # Fall back to aiohttp
+        assert self._retry_client is not None
         async with self._retry_client.get(url, **kwargs) as resp:
             if resp.status >= 400:
                 logger.warning("HTTP {} for {}", resp.status, url)
                 resp.raise_for_status()
             text = await resp.text(errors="replace")
-            logger.debug("Response {} bytes from {}", len(text), url)
-
-            # Detect Cloudflare anti-bot block on mymoviz.co:
-            # The block returns a small (~14KB) 200 page with "Error 404" inside
-            if (
-                "mymoviz.co" in url
-                and len(text) < 20000
-                and ("Error 404" in text or "Page not found" in text)
-                and _HAS_CFFI
-            ):
-                logger.warning(
-                    "Cloudflare block detected ({} bytes, contains 'Error 404') - "
-                    "falling back to curl_cffi for {}", len(text), url,
-                )
-                fallback_text = await self._cffi_get(url)
-                if fallback_text and len(fallback_text) > 20000:
-                    logger.info(
-                        "curl_cffi fallback succeeded: {} bytes from {}",
-                        len(fallback_text), url,
-                    )
-                    return fallback_text
-                logger.warning("curl_cffi fallback also returned small/empty response")
-
+            logger.debug("aiohttp response: {} bytes from {}", len(text), url)
             return text
 
     async def _cffi_get(self, url: str) -> Optional[str]:
@@ -344,6 +431,7 @@ class HttpClient:
         on datacenter IPs (Railway, Heroku, etc.).
         """
         if not _HAS_CFFI:
+            logger.warning("curl_cffi not available - cannot bypass Cloudflare")
             return None
 
         # Get current cookies from aiohttp's jar and pass them to curl_cffi
@@ -351,6 +439,11 @@ class HttpClient:
         if self._cookie_jar is not None:
             for cookie in self._cookie_jar:
                 cookies_dict[cookie.key] = cookie.value
+
+        logger.info(
+            "curl_cffi fetching {} with cookies: {}",
+            url, list(cookies_dict.keys()),
+        )
 
         def _do_request() -> Optional[str]:
             try:
@@ -363,6 +456,16 @@ class HttpClient:
                     timeout=settings.request_timeout,
                     allow_redirects=True,
                 )
+                logger.info(
+                    "curl_cffi response: status={}, size={}, content_type={}",
+                    r.status_code, len(r.text) if r.text else 0,
+                    r.headers.get("content-type", "unknown"),
+                )
+                # Check if we got the same block
+                if r.text and ("Error 404" in r.text or "Page not found" in r.text) and len(r.text) < 20000:
+                    logger.warning(
+                        "curl_cffi ALSO got Cloudflare block ({} bytes)", len(r.text)
+                    )
                 return r.text
             except Exception as exc:
                 logger.warning("curl_cffi request failed: {}", exc)
