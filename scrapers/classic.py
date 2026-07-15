@@ -119,14 +119,37 @@ class ClassicScraper(BaseScraper):
         else:
             url = f"{self.base_url}/{mymoviz_id}"
 
+        logger.info("ClassicScraper fetching detail: {}", url)
         try:
             html = await self.http.get(url)
         except Exception as exc:
-            logger.warning("ClassicScraper detail failed for {}: {}", url, exc)
+            logger.warning("ClassicScraper detail HTTP failed for {}: {}", url, exc)
+            return None
+
+        if not html or len(html) < 500:
+            logger.warning(
+                "ClassicScraper detail got empty/short HTML ({} bytes) for {}",
+                len(html) if html else 0, url,
+            )
             return None
 
         soup = BeautifulSoup(html, "lxml")
-        return self._parse_detail_page(soup, mymoviz_id, content_type, url)
+        detail = self._parse_detail_page(soup, mymoviz_id, content_type, url)
+        if detail is None:
+            logger.warning("ClassicScraper _parse_detail_page returned None for {}", url)
+        elif not (detail.title_fa or detail.title_en):
+            logger.warning(
+                "ClassicScraper detail parsed but no title found for {} (page size={})",
+                url, len(html),
+            )
+            # Log a snippet of the HTML for debugging
+            logger.debug("HTML snippet: {}", html[:500])
+        else:
+            logger.info(
+                "ClassicScraper detail OK for {}: fa='{}' en='{}'",
+                url, detail.title_fa, detail.title_en,
+            )
+        return detail
 
     # ------------------------------------------------------------------
     # Parsing helpers

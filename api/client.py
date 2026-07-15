@@ -184,6 +184,13 @@ class HttpClient:
                 text = await resp.text(errors="replace")
                 status = resp.status
 
+                # Capture all cookies that were set during this request
+                cookies_after = self.get_cookie_string()
+                logger.info(
+                    "Login POST status={}, response_size={}, cookies_acquired='{}'",
+                    status, len(text), cookies_after[:200] if cookies_after else "(none)",
+                )
+
                 # Success heuristics:
                 # - 2xx status
                 # - redirected to home or panel (not still on signin page)

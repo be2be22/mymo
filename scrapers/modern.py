@@ -111,8 +111,14 @@ class ModernScraper(BaseScraper):
         if mymoviz_id.startswith("http"):
             url = mymoviz_id
         else:
-            section = "movie" if content_type == "movie" else "series"
-            url = f"{settings.classic_base_url}/_modern/{section}/{mymoviz_id}"
+            # If mymoviz_id already starts with "tvshows/" or "movie/", don't
+            # re-prefix with another section (it would create /_modern/series/tvshows/...).
+            stripped = mymoviz_id.lstrip("/")
+            if stripped.startswith("tvshows/") or stripped.startswith("movie/"):
+                url = f"{settings.classic_base_url}/_modern/{stripped}"
+            else:
+                section = "movie" if content_type == "movie" else "series"
+                url = f"{settings.classic_base_url}/_modern/{section}/{mymoviz_id}"
 
         try:
             html = await self.http.get(url)
