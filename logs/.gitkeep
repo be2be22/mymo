@@ -1,0 +1,4 @@
+"""Empty placeholder for the logs directory."""
+
+# This file exists only so Git tracks the logs/ directory.
+# Actual log files are git-ignored.
