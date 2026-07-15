@@ -142,8 +142,13 @@ class ClassicScraper(BaseScraper):
                 "ClassicScraper detail parsed but no title found for {} (page size={})",
                 url, len(html),
             )
-            # Log a snippet of the HTML for debugging
-            logger.debug("HTML snippet: {}", html[:500])
+            # Log a snippet of the HTML for debugging - look at the <title> tag and first 800 chars
+            page_title_el = soup.select_one("title")
+            page_title_text = page_title_el.get_text(strip=True) if page_title_el else "(no title tag)"
+            logger.warning("Page <title>='{}', body snippet: {}", page_title_text[:200], html[:800])
+            # Also log any h1/h2 we find
+            for h in soup.select("h1, h2")[:5]:
+                logger.warning("  Found {}: {}", h.name, h.get_text(" ", strip=True)[:200])
         else:
             logger.info(
                 "ClassicScraper detail OK for {}: fa='{}' en='{}'",
