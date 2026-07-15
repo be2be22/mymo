@@ -69,6 +69,13 @@ async def on_startup() -> None:
 
     # HTTP client + scrapers
     await http_client.init()
+
+    # Attempt MyMoviz login (for download links)
+    try:
+        await http_client.login_to_mymoviz()
+    except Exception as exc:
+        logger.warning("MyMoviz login step failed (non-fatal): {}", exc)
+
     await scraper_manager.health_check()
 
     # Scheduler

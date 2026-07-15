@@ -64,6 +64,16 @@ class Settings(BaseSettings):
         )
     )
 
+    # ---------- MyMoviz Authentication ----------
+    # Optional: login credentials - bot will login at startup and use cookies
+    # If MYMOVIZ_COOKIE is set explicitly, it takes precedence over login
+    mymoviz_email: str = Field(default="", description="MyMoviz account email for login")
+    mymoviz_password: str = Field(default="", description="MyMoviz account password for login")
+    mymoviz_cookie: str = Field(
+        default="",
+        description="Raw Cookie header value (e.g. 'session=abc; csrftoken=xyz')",
+    )
+
     # ---------- Cache ----------
     cache_ttl_seconds: int = Field(default=1800, ge=60, le=86400)
     cache_max_size: int = Field(default=1000, ge=10, le=100000)
