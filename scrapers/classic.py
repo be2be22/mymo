@@ -259,109 +259,165 @@ class ClassicScraper(BaseScraper):
             page_url=url,
         )
 
-        # Title - MyMoviz has both Persian and English titles
-        fa_el = soup.select_one(
-            ".movie-titlep, .title-fa, .persian-title, h1.movie-titlep"
-        )
-        if fa_el:
-            detail.title_fa = fa_el.get_text(strip=True)
+        # ----- Title -----
+        # MyMoviz uses h1 for English title, h1.movie-titlep for Persian page title
+        h1 = soup.select_one("h1")
+        if h1:
+            # Get English title from the main h1 (contains title + (year))
+            h1_text = h1.get_text(" ", strip=True)
+            year_match = re.search(r"\(\s*(\d{4})\s*\)", h1_text)
+            if year_match:
+                detail.year = int(year_match.group(1))
+                detail.title_en = re.sub(r"\(\s*\d{4}\s*\)", "", h1_text).strip()
+            else:
+                detail.title_en = h1_text
 
-        en_el = soup.select_one(
-            ".movie-title, .title-en, .english-title, h1.movie-title"
-        )
-        if en_el:
-            en_text = en_el.get_text(" ", strip=True)
-            en_text = re.sub(r"\(\s*\d{4}\s*\)", "", en_text).strip()
-            detail.title_en = en_text or None
-
-        # If neither found, try h1
-        if not detail.title_fa and not detail.title_en:
-            h1 = soup.select_one("h1")
-            if h1:
-                detail.title_fa = h1.get_text(strip=True)
-
-        # Poster
-        img = soup.select_one(".movie-poster img, .poster img, .cover img, img.img-responsive")
-        if img:
-            detail.poster_url = self._make_absolute_url(
-                img.get("data-src") or img.get("src")
-            )
-
-        # Summary
-        summary_el = soup.select_one(
-            ".movie-story, .story, .summary, .description, .plot, [class*=summary]"
-        )
-        if summary_el:
-            detail.summary = summary_el.get_text(" ", strip=True)
-
-        # Meta info
-        meta = self._extract_meta_table(soup)
-        detail.genres = (
-            meta.get("ژانر")
-            or meta.get("Genre")
-            or meta.get("genre")
-            or self._extract_genres(soup)
-        )
-        detail.country = (
-            meta.get("کشور")
-            or meta.get("Country")
-            or meta.get("country")
-        )
-        detail.duration = (
-            meta.get("مدت")
-            or meta.get("Duration")
-            or meta.get("Runtime")
-            or meta.get("زمان")
-        )
-        year_str = (
-            meta.get("سال")
-            or meta.get("Year")
-            or meta.get("year")
-            or meta.get("سال انتشار")
-        )
-        detail.year = self._safe_int(year_str) if year_str else None
-
-        # If year still None, try to extract from URL or title
-        if detail.year is None:
-            m = re.search(r"\(\s*(\d{4})\s*\)", soup.get_text(" ", strip=True))
+        # Persian title is in the <title> tag or h1.movie-titlep
+        title_p = soup.select_one("h1.movie-titlep")
+        if title_p:
+            fa_text = title_p.get_text(" ", strip=True)
+            # Strip "دانلود فیلم ... با دوبله فارسی" wrapper
+            # Look for the title between "دانلود فیلم" and the year
+            m = re.search(r"دانلود\s*(?:فیلم|سریال)\s+(.+?)\s+\d{4}", fa_text)
             if m:
-                detail.year = int(m.group(1))
+                # The captured group may have both Persian and English - keep only Persian
+                fa_part = m.group(1).strip()
+                # Split into tokens and keep only Persian/CJK tokens
+                tokens = fa_part.split()
+                fa_tokens = [
+                    tok for tok in tokens
+                    if any(c.isalpha() and ord(c) > 0x0600 for c in tok)
+                ]
+                detail.title_fa = " ".join(fa_tokens) if fa_tokens else fa_part
+            else:
+                detail.title_fa = fa_text
 
-        # IMDb rating
-        imdb_el = soup.select_one(
-            ".movie-rating, .imdb-rating, .imdb, .bx .movie-rating, [class*=imdb]"
-        )
-        if imdb_el:
-            detail.imdb_rating = self._safe_float(imdb_el.get_text(strip=True))
+        # If still no Persian title, try the page <title>
+        if not detail.title_fa:
+            page_title = soup.select_one("title")
+            if page_title:
+                t = page_title.get_text(strip=True)
+                # Often "دانلود فیلم تلقین Inception 2010 با دوبله فارسی"
+                m = re.search(r"دانلود\s*(?:فیلم|سریال)\s+([^\d]+?)\s+\d{4}", t)
+                if m:
+                    fa_part = m.group(1).strip()
+                    # If it has both Persian and English, keep the Persian part
+                    parts = fa_part.split()
+                    fa_parts = [p for p in parts if any(c.isalpha() and ord(c) > 0x0600 for c in p)]
+                    if fa_parts:
+                        detail.title_fa = " ".join(fa_parts)
 
-        # Qualities - typically shown as multiple "کیفیت: BluRay 1080p" or buttons
-        qualities = []
-        for q in soup.select(".quality, .qualities, .btn-quality, [class*=quality]"):
-            text = q.get_text(strip=True)
-            if text and text not in qualities and len(text) < 50:
-                qualities.append(text)
-        # Also try parsing from "کیفیت : BluRay 1080p" inline text
-        if not qualities:
-            quality_matches = re.findall(
-                r"کیفیت\s*[:：]?\s*([A-Za-z0-9 ]{3,30})", soup.get_text(" ", strip=True)
-            )
-            qualities = [q.strip() for q in quality_matches if q.strip()]
-        if qualities:
-            detail.qualities = ", ".join(dict.fromkeys(qualities))
+        # ----- Poster -----
+        # Poster is in the article header, usually with class containing cover
+        for img in soup.select("article.box-movie-details img, .box-movie-details-header img, img[data-src]"):
+            src = img.get("data-src") or img.get("src")
+            if src and "cover" in src and "tt" in src:
+                detail.poster_url = self._make_absolute_url(src)
+                break
+        if not detail.poster_url:
+            for img in soup.select("img[data-src]"):
+                src = img.get("data-src") or img.get("src")
+                if src and "cover" in src:
+                    detail.poster_url = self._make_absolute_url(src)
+                    break
 
-        # Dubbing / Subtitle flags
+        # ----- Summary -----
+        # MyMoviz stores the summary in a specific section
+        for el in soup.select(".movie-story, .story, .summary, .description, .plot, [class*=story], [class*=summary]"):
+            text = el.get_text(" ", strip=True)
+            if text and len(text) > 50:
+                detail.summary = text
+                break
+        if not detail.summary:
+            # Try the og:description meta tag
+            meta_desc = soup.select_one('meta[name="description"], meta[property="og:description"]')
+            if meta_desc:
+                content = meta_desc.get("content", "").strip()
+                if content and len(content) > 30:
+                    detail.summary = content
+
+        # ----- Genres (from -genre or m-genre links in the header only) -----
+        # Restrict to inside article header to avoid sidebar/footer genre links
+        header = soup.select_one("article.box-movie-details .box-movie-details-header, .box-movie-details-header")
+        search_root = header if header else soup
+        genre_links = search_root.select(".-genre a, .m-genre a, a[href*='/genres/']")
+        if genre_links:
+            genres = []
+            for g in genre_links:
+                t = g.get_text(strip=True)
+                if t and t not in genres and "/genres/" in (g.get("href") or ""):
+                    genres.append(t)
+            if genres:
+                detail.genres = ", ".join(genres[:8])
+
+        # ----- Country -----
+        for a in soup.select("a[href*='/countries/']"):
+            t = a.get_text(strip=True)
+            if t and len(t) < 50:
+                detail.country = t
+                break
+
+        # ----- Duration -----
         text = soup.get_text(" ", strip=True)
+        dur_match = re.search(r"(\d+\s*(?:ساعت|دقیقه|hour|min|h)(?:\s*\d+\s*دقیقه)?)", text)
+        if dur_match:
+            detail.duration = dur_match.group(1).strip()
+        else:
+            # Try mm:ss or h:mm format
+            dur_match2 = re.search(r"\b(\d{1,2}:\d{2}(?::\d{2})?)\b", text)
+            if dur_match2:
+                detail.duration = dur_match2.group(1)
+
+        # ----- Year -----
+        if detail.year is None:
+            year_match = re.search(r"\(\s*(\d{4})\s*\)", text)
+            if year_match:
+                detail.year = int(year_match.group(1))
+
+        # ----- IMDb rating -----
+        # Rating is in div.-rating-rating with text like "8.8 /10 2114567 users"
+        rating_el = soup.select_one("div.-rating-rating")
+        if rating_el:
+            rating_text = rating_el.get_text(" ", strip=True)
+            # Extract just the first float (e.g. "8.8 /10 2114567 users" -> 8.8)
+            m = re.search(r"(\d+\.\d+)", rating_text)
+            if m:
+                detail.imdb_rating = float(m.group(1))
+        else:
+            # Try other selectors
+            for el in soup.select(".-rating-block, .movie-rating, .imdb-rating"):
+                t = el.get_text(" ", strip=True)
+                m = re.search(r"(\d+\.\d+)", t)
+                if m:
+                    detail.imdb_rating = float(m.group(1))
+                    break
+
+        # ----- Quality -----
+        quality_el = soup.select_one(".-quality, .quality, .btn-quality")
+        if quality_el:
+            detail.qualities = quality_el.get_text(strip=True)
+        else:
+            # Search for quality text
+            qs = []
+            for q in soup.select("[class*=quality]"):
+                t = q.get_text(strip=True)
+                if t and t not in qs and len(t) < 50 and any(c.isdigit() or c.isalpha() for c in t):
+                    qs.append(t)
+            if qs:
+                detail.qualities = ", ".join(dict.fromkeys(qs))
+
+        # ----- Dubbing / Subtitle flags -----
         detail.has_dubbing = "دوبله" in text
         detail.has_subtitle = "زیرنویس" in text
 
-        # Episodes (for series)
+        # ----- Episodes (for series) -----
         if content_type == "series":
             detail.episodes = self._parse_episodes(soup)
             if detail.episodes:
                 ep = detail.episodes[0]
                 detail.latest_episode = f"فصل {ep.season or '?'} قسمت {ep.episode or '?'}"
 
-        # Compute a raw hash to detect ANY change for scheduler use
+        # ----- Raw hash for change detection -----
         body_text = soup.get_text(" ", strip=True)
         detail.raw_hash = hashlib.md5(body_text.encode("utf-8")).hexdigest()[:16]
 
