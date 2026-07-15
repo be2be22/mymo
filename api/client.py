@@ -55,7 +55,9 @@ class HttpClient:
             "User-Agent": settings.user_agent,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
             "Accept-Language": "fa-IR,fa;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Accept-Encoding": "gzip, deflate, br",
+            # IMPORTANT: do NOT include 'br' here unless the brotli library is
+            # installed, otherwise aiohttp will fail to decode the response.
+            "Accept-Encoding": "gzip, deflate",
             "Cache-Control": "no-cache",
             "Pragma": "no-cache",
             "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
