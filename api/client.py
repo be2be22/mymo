@@ -434,11 +434,24 @@ class HttpClient:
             logger.warning("curl_cffi not available - cannot bypass Cloudflare")
             return None
 
-        # Get current cookies from aiohttp's jar and pass them to curl_cffi
+        # Build cookies dict from multiple sources:
+        # 1. MYMOVIZ_COOKIE env var (raw Cookie header string)
+        # 2. aiohttp cookie jar (cookies from login flow)
         cookies_dict: dict[str, str] = {}
+
+        # Parse MYMOVIZ_COOKIE env var (format: "name1=val1; name2=val2")
+        if settings.mymoviz_cookie:
+            for pair in settings.mymoviz_cookie.split(";"):
+                pair = pair.strip()
+                if "=" in pair:
+                    k, v = pair.split("=", 1)
+                    cookies_dict[k.strip()] = v.strip()
+
+        # Also add cookies from aiohttp's jar (in case login added more)
         if self._cookie_jar is not None:
             for cookie in self._cookie_jar:
-                cookies_dict[cookie.key] = cookie.value
+                if cookie.key not in cookies_dict:
+                    cookies_dict[cookie.key] = cookie.value
 
         logger.info(
             "curl_cffi fetching {} with cookies: {}",
