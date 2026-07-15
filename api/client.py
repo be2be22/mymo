@@ -5,6 +5,12 @@ MyMoviz cookie-based authentication support.
 Built on top of :mod:`aiohttp` and :mod:`aiohttp_retry`. All scrapers and
 external integrations should go through :class:`HttpClient` so that error
 handling, timeouts, retries, and polite delays stay centralized.
+
+When the primary aiohttp transport receives a small/error page that looks
+like Cloudflare's anti-bot block (e.g. "Error 404, Page not found" inside
+a 200 response of <20KB), the client transparently falls back to
+``curl_cffi`` which impersonates a real Chrome browser and can bypass
+Cloudflare's bot detection. This is essential for Railway/datacenter IPs.
 """
 
 from __future__ import annotations
@@ -19,6 +25,15 @@ from config.settings import settings
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Try to import curl_cffi for Cloudflare bypass
+try:
+    from curl_cffi import requests as cffi_requests
+
+    _HAS_CFFI = True
+except ImportError:  # pragma: no cover
+    _HAS_CFFI = False
+    logger.warning("curl_cffi not installed - Cloudflare bypass fallback disabled")
 
 
 class HttpClient:
@@ -205,24 +220,39 @@ class HttpClient:
                     status, len(text), cookies_after[:200] if cookies_after else "(none)",
                 )
 
-                # Success heuristics:
-                # - 2xx status
-                # - redirected to home or panel (not still on signin page)
-                # - "خروج" (logout) link appears in navbar when logged in
-                is_still_on_signin = (
-                    "ورود به سایت" in text or "capcode" in text
+                # SUCCESS heuristics (must be DEFINITIVE):
+                # 1. "خروج" (logout) link appears in navbar when logged in
+                # 2. "/panel" link appears in navbar
+                # 3. "/signout" link appears
+                # We do NOT use "not on signin page" because a failed login
+                # still shows the signin form without the "ورود به سایت" header
+                # (it shows the form with an error message instead).
+                is_logged_in = (
+                    "خروج" in text
+                    or "/signout" in text
+                    or "/panel/" in text
+                    or "panel/watchlist" in text
                 )
-                is_logged_in = "خروج" in text or "/signout" in text or "/panel" in text
 
-                if status < 400 and (is_logged_in or not is_still_on_signin):
-                    logger.info("✅ MyMoviz login succeeded!")
+                # FAILURE indicators:
+                # - "capcode" present (signin form shown again)
+                # - Response is small (< 15000 bytes = likely the signin form)
+                # - Contains "کلمه عبور" (password field) = signin form
+                is_signin_form = (
+                    "capcode" in text
+                    or "کلمه عبور" in text
+                    or len(text) < 15000
+                )
+
+                if is_logged_in and not is_signin_form:
+                    logger.info("✅ MyMoviz login succeeded! (verified)")
                     return True
 
                 logger.warning(
-                    "❌ MyMoviz login failed (status={}, on_signin={}, logged_in={}). "
-                    "Likely CAPTCHA blocked automated login. "
+                    "❌ MyMoviz login FAILED (status={}, logged_in={}, signin_form={}, "
+                    "response_size={}). Likely CAPTCHA blocked automated login. "
                     "Set MYMOVIZ_COOKIE env var manually.",
-                    status, is_still_on_signin, is_logged_in,
+                    status, is_logged_in, is_signin_form, len(text),
                 )
                 return False
         except Exception as exc:
@@ -258,6 +288,10 @@ class HttpClient:
     async def get(self, url: str, **kwargs: Any) -> str:
         """Perform a GET request with retry; return response text.
 
+        Uses aiohttp first. If the response looks like a Cloudflare anti-bot
+        block (small page with "Error 404" or similar), falls back to
+        curl_cffi which impersonates Chrome and can bypass the block.
+
         Raises:
             aiohttp.ClientError: if all retries are exhausted.
             asyncio.TimeoutError: on persistent timeouts.
@@ -279,7 +313,63 @@ class HttpClient:
                 resp.raise_for_status()
             text = await resp.text(errors="replace")
             logger.debug("Response {} bytes from {}", len(text), url)
+
+            # Detect Cloudflare anti-bot block on mymoviz.co:
+            # The block returns a small (~14KB) 200 page with "Error 404" inside
+            if (
+                "mymoviz.co" in url
+                and len(text) < 20000
+                and ("Error 404" in text or "Page not found" in text)
+                and _HAS_CFFI
+            ):
+                logger.warning(
+                    "Cloudflare block detected ({} bytes, contains 'Error 404') - "
+                    "falling back to curl_cffi for {}", len(text), url,
+                )
+                fallback_text = await self._cffi_get(url)
+                if fallback_text and len(fallback_text) > 20000:
+                    logger.info(
+                        "curl_cffi fallback succeeded: {} bytes from {}",
+                        len(fallback_text), url,
+                    )
+                    return fallback_text
+                logger.warning("curl_cffi fallback also returned small/empty response")
+
             return text
+
+    async def _cffi_get(self, url: str) -> Optional[str]:
+        """Fetch URL using curl_cffi (Chrome impersonation) in a thread.
+
+        This bypasses Cloudflare's anti-bot detection that blocks aiohttp
+        on datacenter IPs (Railway, Heroku, etc.).
+        """
+        if not _HAS_CFFI:
+            return None
+
+        # Get current cookies from aiohttp's jar and pass them to curl_cffi
+        cookies_dict: dict[str, str] = {}
+        if self._cookie_jar is not None:
+            for cookie in self._cookie_jar:
+                cookies_dict[cookie.key] = cookie.value
+
+        def _do_request() -> Optional[str]:
+            try:
+                # impersonate="chrome120" tells curl_cffi to send TLS fingerprint
+                # and HTTP/2 settings matching Chrome 120, which Cloudflare accepts.
+                r = cffi_requests.get(
+                    url,
+                    impersonate="chrome120",
+                    cookies=cookies_dict,
+                    timeout=settings.request_timeout,
+                    allow_redirects=True,
+                )
+                return r.text
+            except Exception as exc:
+                logger.warning("curl_cffi request failed: {}", exc)
+                return None
+
+        # Run blocking curl_cffi in a thread to not block the event loop
+        return await asyncio.get_event_loop().run_in_executor(None, _do_request)
 
     async def get_json(self, url: str, **kwargs: Any) -> Any:
         """Fetch and parse JSON with retry semantics."""
