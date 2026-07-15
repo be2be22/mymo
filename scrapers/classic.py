@@ -1,11 +1,24 @@
 """
 Scraper for the Classic version of MyMoviz.co.
 
-URL pattern:
+URL pattern (verified against live site):
     Home:        https://mymoviz.co
-    Search:      https://mymoviz.co/search?q=<query>
-    Movie page:  https://mymoviz.co/movie/<slug>
-    Series page: https://mymoviz.co/series/<slug>
+    Search:      https://mymoviz.co/search/?q=<query>
+    Movie page:  https://mymoviz.co/tt<imdb_id>/<slug>  OR  https://mymoviz.co/movie/<slug>
+    Series page: https://mymoviz.co/tvshows/<slug>  OR  https://mymoviz.co/series/<slug>
+    Sign in:     https://mymoviz.co/signin
+
+HTML structure of a card (verified):
+    <article class="movie clearfix">
+      <a class="movie-poster" href="/tt1375666/Inception-2010">
+        <img data-src="https://imgsources.cc/...jpg"/>
+      </a>
+      <h2 class="movie-title"><a href="/tt1375666/Inception-2010">Inception <span>(2010)</span></a></h2>
+      <h2 class="movie-titlep"><a href="...">تلقین</a></h2>  <!-- Persian title -->
+      <span class="movie-rating">8.8</span>
+      <span class="text-blue bold">BluRay 1080p</span>     <!-- Quality -->
+      ... "با زیرنویس فارسی" / "دوبله فارسی" ...
+    </article>
 
 The selectors below are conservative and degrade gracefully. If MyMoviz
 changes its markup, the :class:`ScraperManager` will fall back to the
@@ -14,6 +27,7 @@ Modern scraper automatically.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import List, Optional
 from urllib.parse import quote_plus
@@ -46,7 +60,7 @@ class ClassicScraper(BaseScraper):
         if not query:
             return []
 
-        url = f"{self.base_url}/search?q={quote_plus(query)}"
+        url = f"{self.base_url}/search/?q={quote_plus(query)}"
         try:
             html = await self.http.get(url)
         except Exception as exc:
@@ -71,7 +85,7 @@ class ClassicScraper(BaseScraper):
 
     async def get_latest_series(self, limit: int = 20) -> List[SearchResult]:
         try:
-            html = await self.http.get(f"{self.base_url}/series")
+            html = await self.http.get(f"{self.base_url}/tvshows")
         except Exception as exc:
             logger.warning("ClassicScraper get_latest_series failed: {}", exc)
             return []
@@ -81,7 +95,7 @@ class ClassicScraper(BaseScraper):
 
     async def get_popular(self, limit: int = 20) -> List[SearchResult]:
         try:
-            html = await self.http.get(f"{self.base_url}/popular")
+            html = await self.http.get(f"{self.base_url}/?oB=8&limit=50")
         except Exception as exc:
             logger.warning("ClassicScraper get_popular failed: {}", exc)
             return []
@@ -103,8 +117,7 @@ class ClassicScraper(BaseScraper):
         if mymoviz_id.startswith("http"):
             url = mymoviz_id
         else:
-            section = "movie" if content_type == "movie" else "series"
-            url = f"{self.base_url}/{section}/{mymoviz_id}"
+            url = f"{self.base_url}/{mymoviz_id}"
 
         try:
             html = await self.http.get(url)
@@ -122,16 +135,20 @@ class ClassicScraper(BaseScraper):
         """Parse the grid of cards returned on listing/search pages."""
         results: List[SearchResult] = []
 
-        # MyMoviz typically renders cards as <div class="card"> or <article>
-        # We try several common selectors for robustness.
-        cards = soup.select(
-            "div.movie-card, div.card, article.card, .item, .movie-item, "
-            ".post, .product-card, [data-id]"
-        )
+        # MyMoviz uses <article class="movie clearfix"> for both movies and series
+        cards = soup.select("article.movie, .movie-item, .box-movies .movie, .item-movie")
         if not cards:
-            # Fallback: any element with a poster image and a link
-            cards = soup.select("a[href*='/movie/'], a[href*='/series/']")
-            cards = list({c.find_parent() or c for c in cards}) if cards else []
+            # Fallback: any element linking to a /ttXXX or /tvshows path
+            cards = soup.select("a[href*='/tt'], a[href*='/tvshows/']")
+            # Deduplicate by parent
+            seen_parents = set()
+            unique_cards = []
+            for c in cards:
+                parent = c.find_parent(["article", "div", "li"]) or c
+                if id(parent) not in seen_parents:
+                    seen_parents.add(id(parent))
+                    unique_cards.append(parent)
+            cards = unique_cards
 
         for card in cards:
             result = self._parse_single_card(card)
@@ -142,51 +159,78 @@ class ClassicScraper(BaseScraper):
 
     def _parse_single_card(self, card) -> Optional[SearchResult]:
         """Extract a :class:`SearchResult` from a single card element."""
-        # Link
-        link = card.find("a", href=True)
-        href = link["href"] if link else None
-        if href and ("/movie/" in href or "/series/" in href):
-            content_type = "series" if "/series/" in href else "movie"
+        # Detect content type from any link inside the card
+        href = None
+        for link in card.find_all("a", href=True):
+            href = link["href"]
+            if "/tvshows/" in href or "/series/" in href:
+                content_type = "series"
+                break
+            if "/tt" in href or "/movie/" in href:
+                content_type = "movie"
+                break
         else:
-            content_type = "movie"
+            if href:
+                content_type = "movie"
+            else:
+                return None
 
         page_url = self._make_absolute_url(href) if href else None
         mymoviz_id = None
         if href:
-            m = re.search(r"/(movie|series)/([^/?#]+)", href)
-            if m:
-                mymoviz_id = m.group(2)
+            # Strip query string and take last path segment
+            path = href.split("?")[0].split("#")[0].strip("/")
+            if path:
+                mymoviz_id = path
 
         # Poster
         poster = None
         img = card.find("img")
         if img:
-            poster = img.get("src") or img.get("data-src") or img.get("data-original")
+            poster = img.get("data-src") or img.get("src") or img.get("data-original")
             poster = self._make_absolute_url(poster)
 
-        # Title
+        # Titles: MyMoviz has both Persian (movie-titlep) and English (movie-title)
         title_fa = None
         title_en = None
-        title_el = card.select_one(".title, .movie-title, h3, h4, .name, .card-title")
-        if title_el:
-            title_fa = title_el.get_text(strip=True)
-        en_el = card.select_one(".title-en, .english-title, .original-title")
-        if en_el:
-            title_en = en_el.get_text(strip=True)
 
-        # Year
-        year = None
-        year_el = card.select_one(".year, .release-year, .date")
-        if year_el:
-            year = self._safe_int(year_el.get_text(strip=True))
+        fa_el = card.select_one(".movie-titlep, .title-fa, .persian-title")
+        if fa_el:
+            title_fa = fa_el.get_text(strip=True)
+
+        en_el = card.select_one(".movie-title, .title-en, .english-title")
+        if en_el:
+            en_text = en_el.get_text(" ", strip=True)
+            # Extract year from "( 2010 )" pattern
+            year_match = re.search(r"\(\s*(\d{4})\s*\)", en_text)
+            if year_match:
+                year = int(year_match.group(1))
+                # Remove the year from the title
+                en_text = re.sub(r"\(\s*\d{4}\s*\)", "", en_text).strip()
+            else:
+                year = None
+            title_en = en_text or None
+        else:
+            year = None
+
+        # Fallback for year if not found in title
+        if year is None:
+            year_el = card.select_one(".year, .release-year, .date")
+            if year_el:
+                year = self._safe_int(year_el.get_text(strip=True))
 
         # Rating
         rating = None
-        rating_el = card.select_one(".rating, .imdb, .score, .imdb-rating")
+        rating_el = card.select_one(".movie-rating, .rating, .imdb, .score, .imdb-rating")
         if rating_el:
             rating = self._safe_float(rating_el.get_text(strip=True))
 
-        return SearchResult(
+        # Detect dubbing / subtitle from card text
+        card_text = card.get_text(" ", strip=True)
+        has_dubbing = "دوبله" in card_text
+        has_subtitle = "زیرنویس" in card_text
+
+        result = SearchResult(
             title_fa=title_fa,
             title_en=title_en,
             year=year,
@@ -196,6 +240,10 @@ class ClassicScraper(BaseScraper):
             page_url=page_url,
             mymoviz_id=mymoviz_id,
         )
+        # Stash extra info for detail page use
+        result._has_dubbing = has_dubbing  # type: ignore[attr-defined]
+        result._has_subtitle = has_subtitle  # type: ignore[attr-defined]
+        return result
 
     def _parse_detail_page(
         self,
@@ -211,57 +259,100 @@ class ClassicScraper(BaseScraper):
             page_url=url,
         )
 
-        # Title
-        title_el = soup.select_one(
-            "h1.movie-title, h1.title, h1.series-title, .movie-detail h1, h1"
+        # Title - MyMoviz has both Persian and English titles
+        fa_el = soup.select_one(
+            ".movie-titlep, .title-fa, .persian-title, h1.movie-titlep"
         )
-        if title_el:
-            detail.title_fa = title_el.get_text(strip=True)
+        if fa_el:
+            detail.title_fa = fa_el.get_text(strip=True)
+
         en_el = soup.select_one(
-            ".english-title, .original-title, .title-en, .movie-detail .original"
+            ".movie-title, .title-en, .english-title, h1.movie-title"
         )
         if en_el:
-            detail.title_en = en_el.get_text(strip=True)
+            en_text = en_el.get_text(" ", strip=True)
+            en_text = re.sub(r"\(\s*\d{4}\s*\)", "", en_text).strip()
+            detail.title_en = en_text or None
+
+        # If neither found, try h1
+        if not detail.title_fa and not detail.title_en:
+            h1 = soup.select_one("h1")
+            if h1:
+                detail.title_fa = h1.get_text(strip=True)
 
         # Poster
-        img = soup.select_one(".poster img, .movie-poster img, .cover img, img.poster")
+        img = soup.select_one(".movie-poster img, .poster img, .cover img, img.img-responsive")
         if img:
             detail.poster_url = self._make_absolute_url(
-                img.get("src") or img.get("data-src")
+                img.get("data-src") or img.get("src")
             )
 
         # Summary
         summary_el = soup.select_one(
-            ".summary, .description, .plot, .storyline, .movie-detail .description, [class*=summary]"
+            ".movie-story, .story, .summary, .description, .plot, [class*=summary]"
         )
         if summary_el:
             detail.summary = summary_el.get_text(" ", strip=True)
 
-        # Meta info - try to find labels
+        # Meta info
         meta = self._extract_meta_table(soup)
-        detail.genres = meta.get("ژانر") or meta.get("Genre") or meta.get("genre")
-        detail.country = meta.get("کشور") or meta.get("Country") or meta.get("country")
-        detail.duration = meta.get("مدت") or meta.get("Duration") or meta.get("Runtime")
-        detail.year = self._safe_int(meta.get("سال") or meta.get("Year") or meta.get("year"))
+        detail.genres = (
+            meta.get("ژانر")
+            or meta.get("Genre")
+            or meta.get("genre")
+            or self._extract_genres(soup)
+        )
+        detail.country = (
+            meta.get("کشور")
+            or meta.get("Country")
+            or meta.get("country")
+        )
+        detail.duration = (
+            meta.get("مدت")
+            or meta.get("Duration")
+            or meta.get("Runtime")
+            or meta.get("زمان")
+        )
+        year_str = (
+            meta.get("سال")
+            or meta.get("Year")
+            or meta.get("year")
+            or meta.get("سال انتشار")
+        )
+        detail.year = self._safe_int(year_str) if year_str else None
+
+        # If year still None, try to extract from URL or title
+        if detail.year is None:
+            m = re.search(r"\(\s*(\d{4})\s*\)", soup.get_text(" ", strip=True))
+            if m:
+                detail.year = int(m.group(1))
 
         # IMDb rating
-        imdb_el = soup.select_one(".imdb-rating, .imdb, [class*=imdb]")
+        imdb_el = soup.select_one(
+            ".movie-rating, .imdb-rating, .imdb, .bx .movie-rating, [class*=imdb]"
+        )
         if imdb_el:
             detail.imdb_rating = self._safe_float(imdb_el.get_text(strip=True))
 
-        # Qualities
+        # Qualities - typically shown as multiple "کیفیت: BluRay 1080p" or buttons
         qualities = []
-        for q in soup.select(".quality, .qualities, [class*=quality]"):
+        for q in soup.select(".quality, .qualities, .btn-quality, [class*=quality]"):
             text = q.get_text(strip=True)
-            if text and text not in qualities:
+            if text and text not in qualities and len(text) < 50:
                 qualities.append(text)
+        # Also try parsing from "کیفیت : BluRay 1080p" inline text
+        if not qualities:
+            quality_matches = re.findall(
+                r"کیفیت\s*[:：]?\s*([A-Za-z0-9 ]{3,30})", soup.get_text(" ", strip=True)
+            )
+            qualities = [q.strip() for q in quality_matches if q.strip()]
         if qualities:
-            detail.qualities = ", ".join(qualities)
+            detail.qualities = ", ".join(dict.fromkeys(qualities))
 
         # Dubbing / Subtitle flags
-        text_lower = soup.get_text(" ", strip=True).lower()
-        detail.has_dubbing = "دوبله" in soup.get_text() or "dubbing" in text_lower
-        detail.has_subtitle = "زیرنویس" in soup.get_text() or "subtitle" in text_lower
+        text = soup.get_text(" ", strip=True)
+        detail.has_dubbing = "دوبله" in text
+        detail.has_subtitle = "زیرنویس" in text
 
         # Episodes (for series)
         if content_type == "series":
@@ -271,17 +362,21 @@ class ClassicScraper(BaseScraper):
                 detail.latest_episode = f"فصل {ep.season or '?'} قسمت {ep.episode or '?'}"
 
         # Compute a raw hash to detect ANY change for scheduler use
-        import hashlib
         body_text = soup.get_text(" ", strip=True)
         detail.raw_hash = hashlib.md5(body_text.encode("utf-8")).hexdigest()[:16]
 
         return detail
 
-    def _extract_meta_table(self, soup: BeautifulSoup) -> dict:
-        """Extract key-value metadata from the detail page.
+    def _extract_genres(self, soup: BeautifulSoup) -> Optional[str]:
+        """Extract genre list from genre links."""
+        genre_links = soup.select(".m-genre a, .genres a, .movie-genres a")
+        if not genre_links:
+            return None
+        genres = [g.get_text(strip=True) for g in genre_links if g.get_text(strip=True)]
+        return ", ".join(genres) if genres else None
 
-        Looks for both <table> rows and labeled <div>/<li> elements.
-        """
+    def _extract_meta_table(self, soup: BeautifulSoup) -> dict:
+        """Extract key-value metadata from the detail page."""
         meta: dict[str, Optional[str]] = {}
 
         # Try table rows
@@ -293,13 +388,15 @@ class ClassicScraper(BaseScraper):
                 if key:
                     meta[key] = value
 
-        # Try <div class="row"><span class="label">...</span><span class="value">...</span></div>
-        for row in soup.select(".row, .meta-item, .info-item"):
-            label = row.select_one(".label, .key, .meta-label")
-            value = row.select_one(".value, .meta-value")
+        # Try labeled rows
+        for row in soup.select(".row, .meta-item, .info-item, .m-b-6, .bx"):
+            label = row.select_one(".label, .key, .meta-label, .small, b, strong")
+            value = row.select_one(".value, .meta-value, .bold, .text-blue")
             if label and value:
                 key = label.get_text(strip=True).rstrip(":")
-                meta[key] = value.get_text(" ", strip=True)
+                # Skip if key is too long (probably not a real label)
+                if key and len(key) < 30:
+                    meta[key] = value.get_text(" ", strip=True)
 
         return meta
 
@@ -307,16 +404,16 @@ class ClassicScraper(BaseScraper):
         """Extract episode list from a series detail page."""
         episodes: List[EpisodeDetail] = []
 
-        # Try various episode selectors
+        # MyMoviz typically lists episodes with season/episode numbers
         ep_els = soup.select(
             ".episode, .episode-item, .episodes li, .episode-list .item, "
-            "tr.episode, [class*=episode]"
+            "tr.episode, [class*=episode], .season-episode, .ep-row"
         )
         for ep_el in ep_els:
             ep = EpisodeDetail()
             text = ep_el.get_text(" ", strip=True)
 
-            # Try to extract season/episode numbers
+            # Try to extract season/episode numbers from various formats
             m = re.search(r"(?:فصل|S|Season)\s*(\d+)\s*(?:قسمت|E|Episode)\s*(\d+)", text, re.I)
             if m:
                 ep.season = int(m.group(1))
@@ -326,6 +423,11 @@ class ClassicScraper(BaseScraper):
                 if m2:
                     ep.season = int(m2.group(1))
                     ep.episode = int(m2.group(2))
+                else:
+                    m3 = re.search(r"قسمت\s*(\d+)", text)
+                    if m3:
+                        ep.episode = int(m3.group(1))
+                        ep.season = 1
 
             link = ep_el.find("a", href=True)
             if link:
@@ -333,7 +435,9 @@ class ClassicScraper(BaseScraper):
 
             qualities = ep_el.select(".quality, [class*=quality]")
             if qualities:
-                ep.qualities = ", ".join(q.get_text(strip=True) for q in qualities)
+                ep.qualities = ", ".join(
+                    q.get_text(strip=True) for q in qualities if q.get_text(strip=True)
+                )
 
             ep_text = ep_el.get_text(" ", strip=True)
             ep.has_dubbing = "دوبله" in ep_text

@@ -115,6 +115,11 @@ class HttpClient:
 
         Returns True on success. Stores the session cookie in the cookie jar.
         Skipped if no credentials are configured or if a raw cookie is set.
+
+        MyMoviz uses CSRF tokens + optional CAPTCHA, so this may fail.
+        In that case, the bot will continue to function for public pages but
+        download links may not be accessible. Use MYMOVIZ_COOKIE env var to
+        supply a pre-authenticated cookie string as a workaround.
         """
         if settings.mymoviz_cookie:
             logger.info("Skipping MyMoviz login - raw MYMOVIZ_COOKIE already set.")
@@ -127,52 +132,81 @@ class HttpClient:
         await self.init()
         assert self._session is not None
 
-        login_urls = [
-            f"{settings.classic_base_url}/login",
-            f"{settings.classic_base_url}/auth/login",
-            f"{settings.classic_base_url}/api/login",
-            f"{settings.classic_base_url}/_modern/login",
-        ]
+        login_url = f"{settings.classic_base_url}/signin"
 
-        # First GET to fetch CSRF token if any
+        # Step 1: GET the signin page to fetch the CSRF token
         try:
-            async with self._session.get(settings.classic_base_url) as resp:
-                await resp.text()
+            logger.info("Fetching MyMoviz signin page for CSRF token: {}", login_url)
+            async with self._session.get(login_url) as resp:
+                html = await resp.text(errors="replace")
+                if resp.status >= 400:
+                    logger.warning("Signin page returned status {}", resp.status)
+                    return False
         except Exception as exc:
-            logger.debug("Pre-login GET failed: {}", exc)
+            logger.warning("Failed to fetch signin page: {}", exc)
+            return False
 
-        # Try form-based login
-        for login_url in login_urls:
-            try:
-                logger.info("Attempting MyMoviz login at: {}", login_url)
-                payload = {
-                    "email": settings.mymoviz_email,
-                    "password": settings.mymoviz_password,
-                    "username": settings.mymoviz_email,  # some sites use username
-                }
-                async with self._session.post(
-                    login_url,
-                    data=payload,
-                    allow_redirects=True,
-                ) as resp:
-                    text = await resp.text(errors="replace")
-                    status = resp.status
-                    # Success heuristic: 2xx status and not back on login page
-                    is_login_page = (
-                        "login" in text.lower() and "password" in text.lower()
-                    )
-                    if status < 400 and not is_login_page:
-                        logger.info("✅ MyMoviz login succeeded via {}", login_url)
-                        return True
-                    logger.debug(
-                        "Login attempt at {} returned status={} (login_page={})",
-                        login_url, status, is_login_page,
-                    )
-            except Exception as exc:
-                logger.debug("Login attempt at {} failed: {}", login_url, exc)
+        # Step 2: Extract CSRF token from the form
+        import re
+        csrf_match = re.search(
+            r'name="_csrf"\s+value="([^"]+)"', html
+        )
+        if not csrf_match:
+            logger.warning("CSRF token not found on signin page.")
+            return False
+        csrf_token = csrf_match.group(1)
+        logger.info("CSRF token acquired from signin page.")
 
-        logger.warning("❌ All MyMoviz login attempts failed.")
-        return False
+        # Step 3: Detect CAPTCHA requirement
+        has_captcha = "capcode" in html
+        if has_captcha:
+            logger.warning(
+                "⚠ MyMoviz signin page has a CAPTCHA. Automated login may fail. "
+                "Consider setting MYMOVIZ_COOKIE env var with a manually-obtained cookie."
+            )
+
+        # Step 4: Submit login form
+        try:
+            logger.info("Submitting MyMoviz login form to: {}", login_url)
+            payload = {
+                "_csrf": csrf_token,
+                "email": settings.mymoviz_email,
+                "password": settings.mymoviz_password,
+                "random_param": "1",
+                # If CAPTCHA present, we cannot solve it - submit anyway and check response
+                "capcode": "",
+            }
+            async with self._session.post(
+                login_url,
+                data=payload,
+                allow_redirects=True,
+            ) as resp:
+                text = await resp.text(errors="replace")
+                status = resp.status
+
+                # Success heuristics:
+                # - 2xx status
+                # - redirected to home or panel (not still on signin page)
+                # - "خروج" (logout) link appears in navbar when logged in
+                is_still_on_signin = (
+                    "ورود به سایت" in text or "capcode" in text
+                )
+                is_logged_in = "خروج" in text or "/signout" in text or "/panel" in text
+
+                if status < 400 and (is_logged_in or not is_still_on_signin):
+                    logger.info("✅ MyMoviz login succeeded!")
+                    return True
+
+                logger.warning(
+                    "❌ MyMoviz login failed (status={}, on_signin={}, logged_in={}). "
+                    "Likely CAPTCHA blocked automated login. "
+                    "Set MYMOVIZ_COOKIE env var manually.",
+                    status, is_still_on_signin, is_logged_in,
+                )
+                return False
+        except Exception as exc:
+            logger.warning("MyMoviz login POST failed: {}", exc)
+            return False
 
     def get_cookie_string(self) -> str:
         """Return the current cookies as a Cookie header string."""
