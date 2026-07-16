@@ -33,6 +33,18 @@ class SearchResult:
 
 
 @dataclass
+class DownloadGroup:
+    """A single quality group (e.g. "BluRay 1080p, MP4, 2.3GB")."""
+
+    quality: str = ""
+    format: str = ""
+    size: str = ""
+    dtype: str = ""  # "dub" (دوبله), "sub" (زیرنویس), "orig" (زبان اصلی)
+    links: list[dict] = field(default_factory=list)  # [{"label":..., "url":...}]
+    subtitles: list[dict] = field(default_factory=list)  # [{"label":..., "url":...}]
+
+
+@dataclass
 class EpisodeDetail:
     """A single episode of a series."""
 
@@ -44,6 +56,7 @@ class EpisodeDetail:
     has_dubbing: bool = False
     has_subtitle: bool = False
     released_at: Optional[str] = None
+    download_groups: List[DownloadGroup] = field(default_factory=list)
 
 
 @dataclass
@@ -68,7 +81,9 @@ class ContentDetail:
     latest_episode: Optional[str] = None
     episodes: List[EpisodeDetail] = field(default_factory=list)
     raw_hash: Optional[str] = None  # used to detect ANY change
-    download_links: List[dict] = field(default_factory=list)  # [{"label":..., "url":..., "quality":...}]
+    download_links: List[dict] = field(default_factory=list)  # flat list (legacy)
+    download_groups: List[DownloadGroup] = field(default_factory=list)  # for movies
+    seasons: List[dict] = field(default_factory=list)  # [{"season":1,"episodes":10,"label":"فصل 1"}]
 
 
 class BaseScraper(abc.ABC):

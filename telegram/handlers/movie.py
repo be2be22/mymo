@@ -1,5 +1,14 @@
 """
-Movie/Series detail handlers - show full info and favorite/subscription actions.
+Movie/Series detail handlers - show full info, download flow (season→quality→links),
+favorite/subscription actions.
+
+Uses short IMDb IDs (without "tt" prefix) in callback_data:
+    d:<id>       → detail page
+    fav:<id>     → toggle favorite
+    sub:<id>     → toggle subscription
+    dl:<id>      → download (movies: show qualities, series: show seasons)
+    sq:<id>:<s>  → season <s> quality selection (series only)
+    ql:<id>:<s>:<quality> → show all download links for quality <quality> in season <s>
 """
 
 from __future__ import annotations
@@ -23,7 +32,11 @@ from scrapers.manager import scraper_manager
 from telegram.keyboards import (
     back_to_main_kb,
     content_detail_kb,
+    resolve_short_id,
+    seasons_kb,
+    qualities_kb,
 )
+from telegram.safe_edit import safe_edit_message, safe_delete_message
 from utils.formatters import format_movie_info, format_series_info
 from utils.logger import get_logger
 
@@ -33,43 +46,33 @@ router = Router(name="movie")
 
 
 # ----------------------------------------------------------------------
-# Detail callback: d:<short_key>
-# Uses short 8-char hash mapped to (content_type, mymoviz_id) via DB
-# to stay within Telegram's 64-byte callback_data limit.
+# Detail callback: d:<short_id>
 # ----------------------------------------------------------------------
 @router.callback_query(lambda c: c.data and c.data.startswith("d:"))
 async def cb_detail(
     callback: CallbackQuery, session: AsyncSession, db_user: User
 ) -> None:
     """Open the detail page for a movie or series."""
-    short_key = callback.data[2:]  # strip "d:"
-    from database.repositories import CallbackMappingRepository
-    resolved = await CallbackMappingRepository.resolve(session, short_key)
-    if not resolved:
-        await callback.answer("❌ نشست منقضی شده. دوباره جستجو کنید.", show_alert=True)
-        return
-    content_type_str, mymoviz_id = resolved
-
-    if content_type_str not in ("movie", "series"):
-        await callback.answer("❌ نوع نامعتبر است.", show_alert=True)
-        return
-
-    content_type = ContentType.MOVIE if content_type_str == "movie" else ContentType.SERIES
+    short_id = callback.data[2:]
+    imdb_id = resolve_short_id(short_id)  # e.g. "tt1375666"
 
     # Check cache first
-    cache_key = f"detail:{content_type_str}:{mymoviz_id}"
+    cache_key = f"detail:{imdb_id}"
     cached = await cache.get(cache_key)
     if cached is not None:
         logger.debug("Detail cache hit for {}", cache_key)
-        await _render_detail(callback.message, cached, content_type, mymoviz_id, db_user, session)
+        await _render_detail(callback.message, cached, imdb_id, db_user, session)
         await callback.answer()
         return
 
-    wait_text = "⏳ در حال دریافت اطلاعات..."
-    from telegram.safe_edit import safe_edit_message
-    await safe_edit_message(callback.message, wait_text)
+    await safe_edit_message(callback.message, "⏳ در حال دریافت اطلاعات...")
 
-    detail = await scraper_manager.get_content_detail(mymoviz_id, content_type_str)
+    # Fetch detail page using just the IMDb ID (works for both movies and series)
+    detail = await scraper_manager.get_content_detail(imdb_id, "movie")
+    if not detail:
+        # Try as series
+        detail = await scraper_manager.get_content_detail(imdb_id, "series")
+
     if not detail:
         await safe_edit_message(
             callback.message,
@@ -79,9 +82,19 @@ async def cb_detail(
         await callback.answer()
         return
 
-    # Persist to database (upsert)
+    # Determine content type from URL or episodes
+    if detail.page_url and "/tvshows/" in detail.page_url:
+        content_type_str = "series"
+    elif detail.episodes:
+        content_type_str = "series"
+    else:
+        content_type_str = "movie"
+    content_type = ContentType.SERIES if content_type_str == "series" else ContentType.MOVIE
+    detail.content_type = content_type_str
+
+    # Persist to database
     data = {
-        "mymoviz_id": detail.mymoviz_id or mymoviz_id,
+        "mymoviz_id": detail.mymoviz_id or imdb_id,
         "title_fa": detail.title_fa,
         "title_en": detail.title_en,
         "year": detail.year,
@@ -104,23 +117,6 @@ async def cb_detail(
     else:
         series = await SeriesRepository.upsert(session, data)
         db_id = series.id
-        # Persist latest episodes
-        if detail.episodes:
-            from database.repositories import EpisodeRepository
-            for ep in detail.episodes:
-                await EpisodeRepository.upsert(
-                    session,
-                    {
-                        "series_id": series.id,
-                        "season": ep.season,
-                        "episode": ep.episode,
-                        "title": ep.title,
-                        "page_url": ep.page_url,
-                        "qualities": ep.qualities,
-                        "has_dubbing": ep.has_dubbing,
-                        "has_subtitle": ep.has_subtitle,
-                    },
-                )
 
     payload = {
         "detail": {
@@ -139,42 +135,73 @@ async def cb_detail(
             "has_subtitle": detail.has_subtitle,
             "latest_episode": detail.latest_episode,
             "content_type": content_type_str,
-            "mymoviz_id": detail.mymoviz_id or mymoviz_id,
+            "mymoviz_id": detail.mymoviz_id or imdb_id,
             "db_id": db_id,
-        }
+        },
+        "download_groups": [
+            {
+                "quality": g.quality,
+                "format": g.format,
+                "size": g.size,
+                "dtype": g.dtype,
+                "links": g.links,
+                "subtitles": g.subtitles,
+            }
+            for g in detail.download_groups
+        ],
+        "seasons": detail.seasons,
+        "episodes": [
+            {
+                "season": e.season,
+                "episode": e.episode,
+                "title": e.title,
+                "download_groups": [
+                    {
+                        "quality": g.quality,
+                        "format": g.format,
+                        "size": g.size,
+                        "dtype": g.dtype,
+                        "links": g.links,
+                        "subtitles": g.subtitles,
+                    }
+                    for g in e.download_groups
+                ],
+            }
+            for e in detail.episodes
+        ],
     }
     await cache.set(cache_key, payload)
-    await _render_detail(callback.message, payload, content_type, mymoviz_id, db_user, session)
+    await _render_detail(callback.message, payload, imdb_id, db_user, session)
     await callback.answer()
 
 
 async def _render_detail(
     message: Message,
     payload: dict,
-    content_type: ContentType,
-    mymoviz_id: str,
+    imdb_id: str,
     db_user: User,
     session: AsyncSession,
 ) -> None:
     """Render the detail message with poster + buttons."""
     d = payload["detail"]
+    content_type_str = d.get("content_type", "movie")
+    content_type = ContentType.SERIES if content_type_str == "series" else ContentType.MOVIE
 
     # Build text
     if content_type == ContentType.MOVIE:
-        # Build a temporary Movie-like dict to reuse formatter
         class _M:
             pass
         m = _M()
         for k, v in d.items():
             setattr(m, k, v)
-        text = format_movie_info(m)  # type: ignore[arg-type]
+        text = format_movie_info(m)
     else:
         class _S:
             pass
         s = _S()
         for k, v in d.items():
             setattr(s, k, v)
-        text = format_series_info(s)  # type: ignore[arg-type]
+        text = format_series_info(s)
 
     # Check favorite & subscription status
     db_id = d.get("db_id")
@@ -191,134 +218,103 @@ async def _render_detail(
             movie_id=db_id if content_type == ContentType.MOVIE else None,
             series_id=db_id if content_type == ContentType.SERIES else None,
         )
-        # Note: SubscriptionRepository.exists was used; ensure method exists
-        # If not exists() method, fallback to list check below.
 
-    kb = await content_detail_kb(
+    kb = content_detail_kb(
         content_type=content_type,
-        mymoviz_id=mymoviz_id,
-        session=session,
+        mymoviz_id=imdb_id,
         site_url=d.get("page_url"),
         is_favorite=is_fav,
         is_subscribed=is_sub,
     )
 
     poster_url = d.get("poster_url")
-    from telegram.safe_edit import safe_edit_message, safe_delete_message
     if poster_url:
-        # If current message is already a photo, edit its caption.
-        # Otherwise delete the text message and send a new photo.
         if message.photo:
-            # Already a photo - just edit the caption and keyboard
             try:
                 await message.edit_caption(caption=text, reply_markup=kb)
             except Exception as exc:
                 logger.warning("edit_caption failed: {}", exc)
                 await safe_edit_message(message, text, reply_markup=kb)
         else:
-            # Try to delete the text message and send a new photo
-            deleted = await safe_delete_message(message)
+            await safe_delete_message(message)
             try:
-                await message.answer_photo(
-                    photo=poster_url,
-                    caption=text,
-                    reply_markup=kb,
-                )
+                await message.answer_photo(photo=poster_url, caption=text, reply_markup=kb)
             except Exception as exc:
-                logger.warning("answer_photo failed (poster={}): {}", poster_url, exc)
-                # Fall back to text-only
-                from aiogram.types import Message as AiogramMessage
-                # If we deleted the original, we need a fresh message to answer
-                # message.answer() works on the chat, not the (deleted) message
+                logger.warning("answer_photo failed: {}", exc)
                 await message.answer(text, reply_markup=kb, disable_web_page_preview=True)
     else:
         await safe_edit_message(message, text, reply_markup=kb)
 
 
 # ----------------------------------------------------------------------
-# Favorite callback: fav:<short_key>
+# Favorite callback: fav:<short_id>
 # ----------------------------------------------------------------------
 @router.callback_query(lambda c: c.data and c.data.startswith("fav:"))
 async def cb_favorite(
     callback: CallbackQuery, session: AsyncSession, db_user: User
 ) -> None:
     """Toggle favorite status for a content item."""
-    short_key = callback.data[4:]
-    from database.repositories import CallbackMappingRepository
-    resolved = await CallbackMappingRepository.resolve(session, short_key)
-    if not resolved:
-        await callback.answer("❌ نشست منقضی شده.", show_alert=True)
-        return
-    content_type_str, mymoviz_id = resolved
-    content_type = ContentType.MOVIE if content_type_str == "movie" else ContentType.SERIES
+    short_id = callback.data[4:]
+    imdb_id = resolve_short_id(short_id)
 
-    # Find DB record
-    if content_type == ContentType.MOVIE:
-        movie = await MovieRepository.get_by_mymoviz_id(session, mymoviz_id)
-        if not movie:
-            await callback.answer("❌ ابتدا صفحه را باز کنید.", show_alert=True)
-            return
-        exists = await FavoriteRepository.exists(
-            session, db_user.id, content_type, movie_id=movie.id
-        )
+    # Try movie first, then series
+    movie = await MovieRepository.get_by_mymoviz_id(session, imdb_id)
+    if movie:
+        content_type = ContentType.MOVIE
+        exists = await FavoriteRepository.exists(session, db_user.id, content_type, movie_id=movie.id)
         if exists:
             await FavoriteRepository.remove(session, db_user.id, content_type, movie_id=movie.id)
             await callback.answer("❌ از علاقه‌مندی حذف شد.")
         else:
             await FavoriteRepository.add(session, db_user.id, content_type, movie_id=movie.id)
             await callback.answer("⭐ به علاقه‌مندی اضافه شد.")
-    else:
-        series = await SeriesRepository.get_by_mymoviz_id(session, mymoviz_id)
-        if not series:
-            await callback.answer("❌ ابتدا صفحه را باز کنید.", show_alert=True)
-            return
-        exists = await FavoriteRepository.exists(
-            session, db_user.id, content_type, series_id=series.id
-        )
+        return
+
+    series = await SeriesRepository.get_by_mymoviz_id(session, imdb_id)
+    if series:
+        content_type = ContentType.SERIES
+        exists = await FavoriteRepository.exists(session, db_user.id, content_type, series_id=series.id)
         if exists:
             await FavoriteRepository.remove(session, db_user.id, content_type, series_id=series.id)
             await callback.answer("❌ از علاقه‌مندی حذف شد.")
         else:
             await FavoriteRepository.add(session, db_user.id, content_type, series_id=series.id)
             await callback.answer("⭐ به علاقه‌مندی اضافه شد.")
+        return
+
+    await callback.answer("❌ ابتدا صفحه را باز کنید.", show_alert=True)
 
 
 # ----------------------------------------------------------------------
-# Subscription callback: sub:<short_key>
+# Subscription callback: sub:<short_id>
 # ----------------------------------------------------------------------
 @router.callback_query(lambda c: c.data and c.data.startswith("sub:"))
 async def cb_subscribe(
     callback: CallbackQuery, session: AsyncSession, db_user: User
 ) -> None:
     """Toggle subscription for a content item."""
-    short_key = callback.data[4:]
-    from database.repositories import CallbackMappingRepository
-    resolved = await CallbackMappingRepository.resolve(session, short_key)
-    if not resolved:
-        await callback.answer("❌ نشست منقضی شده.", show_alert=True)
+    short_id = callback.data[4:]
+    imdb_id = resolve_short_id(short_id)
+
+    movie = await MovieRepository.get_by_mymoviz_id(session, imdb_id)
+    if movie:
+        now_active = await SubscriptionRepository.toggle(
+            session, db_user.id, ContentType.MOVIE, movie_id=movie.id
+        )
+        msg = "🔔 اطلاع‌رسانی فعال شد." if now_active else "❌ اطلاع‌رسانی غیرفعال شد."
+        await callback.answer(msg)
         return
-    content_type_str, mymoviz_id = resolved
-    content_type = ContentType.MOVIE if content_type_str == "movie" else ContentType.SERIES
 
-    if content_type == ContentType.MOVIE:
-        movie = await MovieRepository.get_by_mymoviz_id(session, mymoviz_id)
-        if not movie:
-            await callback.answer("❌ ابتدا صفحه را باز کنید.", show_alert=True)
-            return
+    series = await SeriesRepository.get_by_mymoviz_id(session, imdb_id)
+    if series:
         now_active = await SubscriptionRepository.toggle(
-            session, db_user.id, content_type, movie_id=movie.id
+            session, db_user.id, ContentType.SERIES, series_id=series.id
         )
-    else:
-        series = await SeriesRepository.get_by_mymoviz_id(session, mymoviz_id)
-        if not series:
-            await callback.answer("❌ ابتدا صفحه را باز کنید.", show_alert=True)
-            return
-        now_active = await SubscriptionRepository.toggle(
-            session, db_user.id, content_type, series_id=series.id
-        )
+        msg = "🔔 اطلاع‌رسانی فعال شد." if now_active else "❌ اطلاع‌رسانی غیرفعال شد."
+        await callback.answer(msg)
+        return
 
-    msg = "🔔 اطلاع‌رسانی فعال شد." if now_active else "❌ اطلاع‌رسانی غیرفعال شد."
-    await callback.answer(msg, show_alert=False)
+    await callback.answer("❌ ابتدا صفحه را باز کنید.", show_alert=True)
 
 
 # ----------------------------------------------------------------------
@@ -329,9 +325,9 @@ async def cb_favorites_list(
     callback: CallbackQuery, session: AsyncSession, db_user: User
 ) -> None:
     """Show the user's favorite list."""
+    from telegram.keyboards import favorites_list_kb
     favs = await FavoriteRepository.list_by_user(session, db_user.id)
     if not favs:
-        from telegram.safe_edit import safe_edit_message
         await safe_edit_message(
             callback.message,
             "⭐ هنوز هیچ علاقه‌مندی‌ای ثبت نکرده‌اید.",
@@ -343,28 +339,21 @@ async def cb_favorites_list(
     items: list[dict] = []
     for fav in favs:
         if fav.content_type == ContentType.MOVIE and fav.movie:
-            items.append(
-                {
-                    "content_type": "movie",
-                    "mymoviz_id": fav.movie.mymoviz_id,
-                    "title": fav.movie.title_fa or fav.movie.title_en or "—",
-                }
-            )
+            items.append({
+                "content_type": "movie",
+                "mymoviz_id": fav.movie.mymoviz_id,
+                "title": fav.movie.title_fa or fav.movie.title_en or "—",
+            })
         elif fav.content_type == ContentType.SERIES and fav.series:
-            items.append(
-                {
-                    "content_type": "series",
-                    "mymoviz_id": fav.series.mymoviz_id,
-                    "title": fav.series.title_fa or fav.series.title_en or "—",
-                }
-            )
-    from telegram.keyboards import favorites_list_kb
-    from telegram.safe_edit import safe_edit_message
-    kb = await favorites_list_kb(items, session)
+            items.append({
+                "content_type": "series",
+                "mymoviz_id": fav.series.mymoviz_id,
+                "title": fav.series.title_fa or fav.series.title_en or "—",
+            })
     await safe_edit_message(
         callback.message,
         f"⭐ <b>علاقه‌مندی‌های شما ({len(items)})</b>",
-        reply_markup=kb,
+        reply_markup=favorites_list_kb(items),
     )
     await callback.answer()
 
@@ -377,14 +366,12 @@ async def cb_subscriptions_list(
     callback: CallbackQuery, session: AsyncSession, db_user: User
 ) -> None:
     """Show the user's active subscriptions."""
+    from telegram.keyboards import subscriptions_list_kb
     subs = await SubscriptionRepository.list_by_user(session, db_user.id)
     active = [s for s in subs if s.is_active]
     if not active:
-        from telegram.safe_edit import safe_edit_message
         await safe_edit_message(
-            callback.message,
-            "🔔 هیچ اعلان فعالی ندارید.",
-            reply_markup=back_to_main_kb(),
+            callback.message, "🔔 هیچ اعلان فعالی ندارید.", reply_markup=back_to_main_kb()
         )
         await callback.answer()
         return
@@ -392,143 +379,273 @@ async def cb_subscriptions_list(
     items: list[dict] = []
     for sub in active:
         if sub.content_type == ContentType.MOVIE and sub.movie:
-            items.append(
-                {
-                    "content_type": "movie",
-                    "mymoviz_id": sub.movie.mymoviz_id,
-                    "title": sub.movie.title_fa or sub.movie.title_en or "—",
-                }
-            )
+            items.append({
+                "content_type": "movie",
+                "mymoviz_id": sub.movie.mymoviz_id,
+                "title": sub.movie.title_fa or sub.movie.title_en or "—",
+            })
         elif sub.content_type == ContentType.SERIES and sub.series:
-            items.append(
-                {
-                    "content_type": "series",
-                    "mymoviz_id": sub.series.mymoviz_id,
-                    "title": sub.series.title_fa or sub.series.title_en or "—",
-                }
-            )
-    from telegram.keyboards import subscriptions_list_kb
-    from telegram.safe_edit import safe_edit_message
-    kb = await subscriptions_list_kb(items, session)
+            items.append({
+                "content_type": "series",
+                "mymoviz_id": sub.series.mymoviz_id,
+                "title": sub.series.title_fa or sub.series.title_en or "—",
+            })
     await safe_edit_message(
         callback.message,
         f"🔔 <b>اعلان‌های فعال شما ({len(items)})</b>",
-        reply_markup=kb,
+        reply_markup=subscriptions_list_kb(items),
     )
     await callback.answer()
 
 
 # ----------------------------------------------------------------------
-# Downloads: dl:<short_key>
+# Download flow: dl:<short_id>
+# For movies: show quality buttons
+# For series: show season buttons
 # ----------------------------------------------------------------------
 @router.callback_query(lambda c: c.data and c.data.startswith("dl:"))
 async def cb_download(callback: CallbackQuery, session: AsyncSession) -> None:
-    """Show download links - tries to scrape actual links from MyMoviz."""
-    short_key = callback.data[3:]
-    from database.repositories import CallbackMappingRepository
-    resolved = await CallbackMappingRepository.resolve(session, short_key)
-    if not resolved:
-        await callback.answer("❌ نشست منقضی شده.", show_alert=True)
+    """Show download options - movies: qualities, series: seasons."""
+    short_id = callback.data[3:]
+    imdb_id = resolve_short_id(short_id)
+
+    # Check cache for detail data
+    cache_key = f"detail:{imdb_id}"
+    cached = await cache.get(cache_key)
+    if not cached:
+        # Need to fetch detail first
+        await safe_edit_message(callback.message, "⏳ در حال دریافت اطلاعات...")
+        # Trigger detail fetch by calling the detail handler logic
+        # For simplicity, just show a message
+        await safe_edit_message(
+            callback.message,
+            "❌ ابتدا صفحه اطلاعات را باز کنید، بعد دانلود را بزنید.",
+            reply_markup=back_to_main_kb(),
+        )
+        await callback.answer()
         return
-    content_type_str, mymoviz_id = resolved
 
-    await callback.answer("⏳ در حال دریافت لینک‌های دانلود...", show_alert=False)
+    d = cached["detail"]
+    content_type_str = d.get("content_type", "movie")
+    title = d.get("title_fa") or d.get("title_en") or "—"
 
-    # Get content from DB
-    if content_type_str == "movie":
-        movie = await MovieRepository.get_by_mymoviz_id(session, mymoviz_id)
-        if not movie:
-            await callback.message.answer("❌ اطلاعاتی موجود نیست.", reply_markup=back_to_main_kb())
+    if content_type_str == "series":
+        # Show seasons
+        seasons = cached.get("seasons", [])
+        if not seasons:
+            await safe_edit_message(
+                callback.message,
+                f"📺 <b>{title}</b>\n\n❌ قسمتی برای این سریال یافت نشد.",
+                reply_markup=back_to_main_kb(),
+            )
+            await callback.answer()
             return
-        title = movie.title_fa or movie.title_en or "فیلم"
-        url = movie.page_url or ""
-        qualities = movie.qualities or "نامشخص"
-        header = (
-            f"📥 <b>دانلود فیلم</b>\n\n"
-            f"🎬 <b>{title}</b>\n"
-            f"🎥 کیفیت‌ها: {qualities}\n"
-            f"🎙 دوبله: {'✅' if movie.has_dubbing else '❌'}\n"
-            f"📝 زیرنویس: {'✅' if movie.has_subtitle else '❌'}\n"
+        await safe_edit_message(
+            callback.message,
+            f"📺 <b>{title}</b>\n\n📋 یک فصل را برای دانلود انتخاب کنید:",
+            reply_markup=seasons_kb(short_id, seasons),
         )
     else:
-        series = await SeriesRepository.get_by_mymoviz_id(session, mymoviz_id)
-        if not series:
-            await callback.message.answer("❌ اطلاعاتی موجود نیست.", reply_markup=back_to_main_kb())
+        # Movie: show qualities
+        download_groups = cached.get("download_groups", [])
+        if not download_groups:
+            await safe_edit_message(
+                callback.message,
+                f"🎬 <b>{title}</b>\n\n❌ لینک دانلودی برای این فیلم یافت نشد.",
+                reply_markup=back_to_main_kb(),
+            )
+            await callback.answer()
             return
-        title = series.title_fa or series.title_en or "سریال"
-        url = series.page_url or ""
-        qualities = series.qualities or "نامشخص"
-        header = (
-            f"📥 <b>دانلود سریال</b>\n\n"
-            f"📺 <b>{title}</b>\n"
-            f"🎥 کیفیت‌ها: {qualities}\n"
-            f"🎙 دوبله: {'✅' if series.has_dubbing else '❌'}\n"
-            f"📝 زیرنویس: {'✅' if series.has_subtitle else '❌'}\n"
+        # Build quality list
+        qualities = []
+        for g in download_groups:
+            qualities.append({
+                "quality": g.get("quality", ""),
+                "size": g.get("size", ""),
+                "type": g.get("dtype", ""),
+            })
+        await safe_edit_message(
+            callback.message,
+            f"🎬 <b>{title}</b>\n\n🎥 یک کیفیت را برای دانلود انتخاب کنید:",
+            reply_markup=qualities_kb(short_id, None, qualities),
         )
+    await callback.answer()
 
-    # Try to scrape actual download links from the detail page
-    download_links: list[dict] = []
-    try:
-        from scrapers.manager import scraper_manager
-        detail = await scraper_manager.get_content_detail(mymoviz_id, content_type_str)
-        if detail and hasattr(detail, "download_links") and detail.download_links:
-            download_links = detail.download_links[:15]  # limit to 15 links
-    except Exception as exc:
-        logger.warning("Failed to scrape download links: {}", exc)
+
+# ----------------------------------------------------------------------
+# Season quality selection: sq:<short_id>:<season>
+# Series only - show qualities for a specific season
+# ----------------------------------------------------------------------
+@router.callback_query(lambda c: c.data and c.data.startswith("sq:"))
+async def cb_season_quality(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Show quality options for a specific season."""
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("❌ داده نامعتبر است.", show_alert=True)
+        return
+    short_id = parts[1]
+    season_num = int(parts[2])
+    imdb_id = resolve_short_id(short_id)
+
+    cache_key = f"detail:{imdb_id}"
+    cached = await cache.get(cache_key)
+    if not cached:
+        await safe_edit_message(callback.message, "❌ نشست منقضی شده. دوباره باز کنید.", reply_markup=back_to_main_kb())
+        await callback.answer()
+        return
+
+    d = cached["detail"]
+    title = d.get("title_fa") or d.get("title_en") or "—"
+    episodes = cached.get("episodes", [])
+
+    # Filter episodes for this season
+    season_eps = [e for e in episodes if e.get("season") == season_num]
+    if not season_eps:
+        await safe_edit_message(callback.message, "❌ قسمتی برای این فصل یافت نشد.", reply_markup=back_to_main_kb())
+        await callback.answer()
+        return
+
+    # Collect all unique qualities for this season
+    qualities_map: dict[str, dict] = {}
+    for ep in season_eps:
+        for g in ep.get("download_groups", []):
+            q = g.get("quality", "")
+            if q and q not in qualities_map:
+                qualities_map[q] = {
+                    "quality": q,
+                    "size": g.get("size", ""),
+                    "type": g.get("dtype", ""),
+                }
+
+    qualities = list(qualities_map.values())
+    if not qualities:
+        await safe_edit_message(callback.message, "❌ کیفیتی برای این فصل یافت نشد.", reply_markup=back_to_main_kb())
+        await callback.answer()
+        return
+
+    await safe_edit_message(
+        callback.message,
+        f"📺 <b>{title}</b> - فصل {season_num}\n\n🎥 یک کیفیت را انتخاب کنید:",
+        reply_markup=qualities_kb(short_id, season_num, qualities),
+    )
+    await callback.answer()
+
+
+# ----------------------------------------------------------------------
+# Quality links: ql:<short_id>:<season>:<quality>
+# Show all download links for a specific quality (and season for series)
+# ----------------------------------------------------------------------
+@router.callback_query(lambda c: c.data and c.data.startswith("ql:"))
+async def cb_quality_links(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Show all download links for a specific quality."""
+    parts = callback.data.split(":", 3)
+    if len(parts) < 4:
+        await callback.answer("❌ داده نامعتبر است.", show_alert=True)
+        return
+    short_id = parts[1]
+    season_num = int(parts[2])
+    quality = parts[3]
+    imdb_id = resolve_short_id(short_id)
+
+    cache_key = f"detail:{imdb_id}"
+    cached = await cache.get(cache_key)
+    if not cached:
+        await safe_edit_message(callback.message, "❌ نشست منقضی شده.", reply_markup=back_to_main_kb())
+        await callback.answer()
+        return
+
+    d = cached["detail"]
+    title = d.get("title_fa") or d.get("title_en") or "—"
+    content_type_str = d.get("content_type", "movie")
 
     builder = InlineKeyboardBuilder()
+    text_lines = []
 
-    if download_links:
-        # Show actual download links as buttons, grouped by type
-        # Separate watch online, downloads, and subtitles
-        watch_links = [l for l in download_links if "تماشای" in l.get("label", "")]
-        download_btns = [l for l in download_links if "تماشای" not in l.get("label", "")]
-        sub_links = [l for l in download_btns if "زیرنویس" in l.get("label", "")]
-        dl_links = [l for l in download_btns if "زیرنویس" not in l.get("label", "")]
+    if season_num > 0 and content_type_str == "series":
+        # Series: collect all links for this season + quality
+        episodes = cached.get("episodes", [])
+        season_eps = [e for e in episodes if e.get("season") == season_num]
+        # Sort by episode number ascending
+        season_eps.sort(key=lambda e: e.get("episode", 0))
 
-        if watch_links:
-            header += f"\n🎬 <b>تماشای آنلاین ({len(watch_links)} نسخه):</b>\n"
-            for link in watch_links[:5]:
-                label = link.get("label", "تماشای آنلاین")[:40]
-                href = link.get("url", "")
-                quality = link.get("quality", "")
-                btn_text = f"🎬 {label}"
-                if quality:
-                    btn_text += f" ({quality})"
-                btn_text = btn_text[:50]
-                if href:
-                    builder.add(InlineKeyboardButton(text=btn_text, url=href))
+        text_lines.append(f"📺 <b>{title}</b> - فصل {season_num} - {quality}\n")
+        text_lines.append(f"📥 تعداد قسمت‌ها: {len(season_eps)}\n")
 
-        if dl_links:
-            header += f"\n📥 <b>دانلود ({len(dl_links)} نسخه):</b>\n"
-            for link in dl_links[:5]:
-                label = link.get("label", "دانلود")[:40]
-                href = link.get("url", "")
-                quality = link.get("quality", "")
-                btn_text = f"📥 {label}"
-                if quality:
-                    btn_text += f" ({quality})"
-                btn_text = btn_text[:50]
-                if href:
-                    builder.add(InlineKeyboardButton(text=btn_text, url=href))
+        # Collect all download links and subtitles
+        all_links: list[dict] = []
+        all_subs: list[dict] = []
+        for ep in season_eps:
+            for g in ep.get("download_groups", []):
+                if g.get("quality", "") == quality:
+                    for link in g.get("links", []):
+                        if not link.get("premium"):
+                            all_links.append({
+                                "label": f"S{ep['season']}E{ep['episode']}",
+                                "url": link["url"],
+                            })
+                    for sub in g.get("subtitles", []):
+                        all_subs.append({
+                            "label": f"S{ep['season']}E{ep['episode']} - {sub['label']}",
+                            "url": sub["url"],
+                        })
 
-        if sub_links:
-            header += f"\n📝 <b>زیرنویس‌ها ({len(sub_links)}):</b>\n"
-            for link in sub_links[:3]:
-                label = link.get("label", "زیرنویس")[:40]
-                href = link.get("url", "")
-                btn_text = f"📝 {label}"[:50]
-                if href:
-                    builder.add(InlineKeyboardButton(text=btn_text, url=href))
+        if all_links:
+            text_lines.append(f"\n📥 <b>لینک‌های دانلود ({len(all_links)}):</b>")
+            for link in all_links:
+                builder.add(InlineKeyboardButton(
+                    text=f"📥 {link['label']}"[:50],
+                    url=link["url"],
+                ))
 
-        header += "\n\n💡 برای دانلود مستقیم نیاز به اکانت ویژه MyMoviz دارید."
+        if all_subs:
+            text_lines.append(f"\n📝 <b>زیرنویس‌ها ({len(all_subs)}):</b>")
+            for sub in all_subs[:10]:
+                builder.add(InlineKeyboardButton(
+                    text=f"📝 {sub['label']}"[:50],
+                    url=sub["url"],
+                ))
+
         builder.adjust(1)
+        builder.add(InlineKeyboardButton(text="⬅ بازگشت به فصل‌ها", callback_data=f"dl:{short_id}"))
     else:
-        # Fallback: link to site page
-        header += "\n⚠ لینک‌های دانلود دریافت نشد.\nبرای مشاهده لینک‌های دانلود به صفحه سایت بروید:"
-        if url:
-            builder.add(InlineKeyboardButton(text="🌐 صفحه دانلود در سایت", url=url))
+        # Movie: show links for this quality
+        download_groups = cached.get("download_groups", [])
+        text_lines.append(f"🎬 <b>{title}</b> - {quality}\n")
+
+        all_links: list[dict] = []
+        all_subs: list[dict] = []
+        for g in download_groups:
+            if g.get("quality", "") == quality:
+                for link in g.get("links", []):
+                    if not link.get("premium"):
+                        all_links.append({"label": "دانلود", "url": link["url"]})
+                for sub in g.get("subtitles", []):
+                    all_subs.append({"label": sub["label"], "url": sub["url"]})
+
+        if all_links:
+            text_lines.append(f"\n📥 <b>لینک‌های دانلود ({len(all_links)}):</b>")
+            for link in all_links:
+                builder.add(InlineKeyboardButton(
+                    text=f"📥 {link['label']}"[:50],
+                    url=link["url"],
+                ))
+
+        if all_subs:
+            text_lines.append(f"\n📝 <b>زیرنویس‌ها ({len(all_subs)}):</b>")
+            for sub in all_subs:
+                builder.add(InlineKeyboardButton(
+                    text=f"📝 {sub['label']}"[:50],
+                    url=sub["url"],
+                ))
+
+        builder.adjust(1)
+        builder.add(InlineKeyboardButton(text="⬅ بازگشت به کیفیت‌ها", callback_data=f"dl:{short_id}"))
 
     builder.add(InlineKeyboardButton(text="🏠 خانه", callback_data="menu:main"))
 
-    await callback.message.answer(header, reply_markup=builder.as_markup(), disable_web_page_preview=True)
+    text = "\n".join(text_lines)[:4000]
+    if not all_links and not all_subs:
+        text += "\n\n⚠ لینک دانلود رایگان برای این کیفیت موجود نیست.\nممکن است نیاز به اکانت ویژه داشته باشد."
+
+    await safe_edit_message(callback.message, text, reply_markup=builder.as_markup())
+    await callback.answer()

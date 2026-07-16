@@ -493,11 +493,11 @@ class ClassicScraper(BaseScraper):
         detail.has_subtitle = "زیرنویس" in text
 
         # ----- Download links -----
-        detail.download_links = self._parse_download_links(soup)
+        detail.download_groups, detail.download_links = self._parse_movie_downloads(soup)
 
         # ----- Episodes (for series) -----
         if content_type == "series":
-            detail.episodes = self._parse_episodes(soup)
+            detail.episodes, detail.seasons = self._parse_episodes_with_downloads(soup)
             if detail.episodes:
                 ep = detail.episodes[0]
                 detail.latest_episode = f"فصل {ep.season or '?'} قسمت {ep.episode or '?'}"
@@ -508,101 +508,193 @@ class ClassicScraper(BaseScraper):
 
         return detail
 
-    def _parse_download_links(self, soup: BeautifulSoup) -> List[dict]:
-        """Extract download links from the detail page.
+    def _parse_movie_downloads(self, soup: BeautifulSoup) -> tuple[list, list]:
+        """Parse movie download section into structured DownloadGroup objects.
 
-        MyMoviz has TWO download sections:
-        1. "نسخه های قابل پخش آنلاین" (watch online versions) - links to /watch/...
-        2. "لینک های دانلود" (actual download links) - links to /panel/charge
-           (premium) or /subtitles/... (subtitle files)
-
-        We extract all useful links: watch online, subtitles, and download
-        links (even if they point to /panel/charge for non-premium users).
+        Returns (download_groups, flat_download_links).
         """
-        links: List[dict] = []
-        seen_urls: set = set()
+        from scrapers.base import DownloadGroup
 
-        # Get ALL download sections (there are usually 2)
-        download_sections = soup.select(
-            "section.box-movie-download, .box-movie-download, #download, .download-section"
-        )
+        groups: list[DownloadGroup] = []
+        flat_links: list[dict] = []
 
-        for download_section in download_sections:
-            # Find all <a> tags with href that look like download/watch/subtitle links
-            for a in download_section.find_all("a", href=True):
+        # Find the actual download section (not the "watch online" one)
+        # It's the section with id="download" or contains "لینک های دانلود"
+        download_section = None
+        for section in soup.select("section.box-movie-download"):
+            h = section.select_one("h3, h4, .-title")
+            if h:
+                title_text = h.get_text(strip=True)
+                if "لینک های دانلود" in title_text or "دانلود فیلم" in title_text:
+                    download_section = section
+                    break
+
+        if not download_section:
+            # Fallback: any download section
+            download_section = soup.select_one("section#download, section.box-movie-download:last-child")
+            if not download_section:
+                return groups, flat_links
+
+        # Find each quality group (-dl-item)
+        for item in download_section.select(".-dl-item"):
+            group = DownloadGroup()
+            header = item.select_one(".-dl-item-header")
+            if header:
+                # Get quality (e.g. "BluRay 1080p")
+                quality_el = header.select_one("b.-font-large, b")
+                if quality_el:
+                    group.quality = quality_el.get_text(strip=True)
+                # Get format and size from bdi elements
+                bdis = [b.get_text(strip=True) for b in header.select("bdi")]
+                for bdi in bdis:
+                    if "MP4" in bdi or "MKV" in bdi or "AVI" in bdi:
+                        group.format = bdi
+                    elif "مگابایت" in bdi or "گیگابایت" in bdi or "GB" in bdi or "MB" in bdi:
+                        group.size = bdi
+
+            # Detect type (dubbed vs original)
+            item_classes = item.get("class", [])
+            if "dub-box" in item_classes:
+                group.dtype = "dub"
+            else:
+                group.dtype = "orig"
+
+            # Find download links (skip watch online and subtitle toggle buttons)
+            for a in item.select("a.-btn-dl"):
                 href = a.get("href", "").strip()
-                if not href:
+                text = a.get_text(strip=True)
+                if not href or href.startswith("#") or href.startswith("/watch/"):
                     continue
-                # Skip anchors and javascript
-                if href.startswith("#") or "javascript:" in href:
+                # Skip subtitle toggle buttons (no href)
+                if not a.get("href"):
                     continue
-                # Skip external links like google.com/chrome
-                if href.startswith("https://www.google.com") or href.startswith("http://www.google.com"):
-                    continue
-                # Make absolute
                 abs_url = self._make_absolute_url(href)
-                if abs_url in seen_urls:
-                    continue
-                seen_urls.add(abs_url)
-
-                # Try to determine the label and quality from surrounding text
-                label_text = a.get_text(strip=True)
-                # Look at parent for context (quality, size, etc.)
-                parent = a.find_parent(["div", "li", "tr", "p"])
-                parent_text = parent.get_text(" ", strip=True) if parent else label_text
-
-                # Extract quality from text (e.g. "BluRay 1080p", "480p", "720p")
-                quality = ""
-                q_match = re.search(
-                    r"(BluRay|WEB-DL|WEBRip|HDTV|HDRip|CAM|DVDScr)\s*(\d{3,4}p)?",
-                    parent_text, re.I,
-                )
-                if q_match:
-                    quality = q_match.group(0)
+                # Skip /panel/charge (premium-only) - but note it
+                if "/panel/charge" in href:
+                    group.links.append({"label": "ویژه (اکانت پرمیوم)", "url": abs_url, "premium": True})
                 else:
-                    # Try just resolution
-                    q_match2 = re.search(r"(\d{3,4}p)", parent_text)
-                    if q_match2:
-                        quality = q_match2.group(0)
+                    label = "دانلود"
+                    if "دوبله" in text or "Dub" in text:
+                        label = "دانلود دوبله"
+                    elif "زبان اصلی" in text:
+                        label = "دانلود زبان اصلی"
+                    group.links.append({"label": label, "url": abs_url, "premium": False})
+                    flat_links.append({"label": label, "url": abs_url, "quality": group.quality})
 
-                # Determine label and link type
-                if "/watch/" in href:
-                    # Watch online link
-                    label = "تماشای آنلاین"
-                    if "دوبله" in parent_text:
-                        label += " (دوبله)"
-                    elif "زبان اصلی" in parent_text:
-                        label += " (زبان اصلی)"
-                elif "/subtitles/" in href:
-                    # Subtitle link
-                    label = "زیرنویس"
-                    if "دوبله" in parent_text:
-                        label += " - دوبله"
-                    elif "کامل" in parent_text:
-                        label += " - کامل"
-                    elif "انگلیسی" in parent_text:
-                        label += " - انگلیسی"
-                elif "/panel/charge" in href:
-                    # Premium download link - requires paid account
-                    label = "دانلود"
-                    if "دوبله" in parent_text:
-                        label += " (دوبله)"
-                    elif "زبان اصلی" in parent_text:
-                        label += " (زبان اصلی)"
-                elif "دانلود" in parent_text or "download" in parent_text.lower():
-                    label = "دانلود"
-                elif label_text:
-                    label = label_text[:40]
+            # Find subtitle links
+            for a in item.select('a[href*="/subtitles/"]'):
+                href = a.get("href", "").strip()
+                text = a.get_text(strip=True)
+                if href:
+                    abs_url = self._make_absolute_url(href)
+                    group.subtitles.append({"label": text, "url": abs_url})
+                    flat_links.append({"label": f"زیرنویس - {text}", "url": abs_url, "quality": ""})
+
+            if group.quality or group.links:
+                groups.append(group)
+
+        return groups, flat_links
+
+    def _parse_episodes_with_downloads(self, soup: BeautifulSoup) -> tuple[list, list]:
+        """Parse series episodes with download groups.
+
+        Returns (episodes, seasons).
+        episodes: list of EpisodeDetail with download_groups populated.
+        seasons: list of {"season": int, "episodes": int, "label": str}.
+        """
+        from scrapers.base import DownloadGroup
+
+        episodes: list = []
+        seasons: list[dict] = []
+
+        # Find episode divs
+        ep_divs = soup.select(".-dlepisode")
+        season_eps: dict[int, list] = {}
+
+        for ep_div in ep_divs:
+            ep = EpisodeDetail()
+            title_el = ep_div.select_one(".-dl-title")
+            if title_el:
+                title_text = title_el.get_text(" ", strip=True)
+                # Parse "فصل 1 ، قسمت 1"
+                m = re.search(r"فصل\s*(\d+).*?قسمت\s*(\d+)", title_text)
+                if m:
+                    ep.season = int(m.group(1))
+                    ep.episode = int(m.group(2))
                 else:
-                    label = "لینک"
+                    m2 = re.search(r"S(\d+)E(\d+)", title_text)
+                    if m2:
+                        ep.season = int(m2.group(1))
+                        ep.episode = int(m2.group(2))
+                ep.title = title_text[:100]
 
-                links.append({
-                    "label": label,
-                    "url": abs_url,
-                    "quality": quality,
-                })
+            # Parse quality groups within this episode
+            for item in ep_div.select(".-dl-items"):
+                group = DownloadGroup()
+                header = item.select_one(".-dl-item-header")
+                if header:
+                    bdis = [b.get_text(strip=True) for b in header.select("bdi")]
+                    for bdi in bdis:
+                        bdi_clean = bdi.strip()
+                        if re.match(r"(BluRay|WEB-DL|WEBRip|HDTV|HDRip|CAM|DVDScr)\s*\d{3,4}p", bdi_clean, re.I) or \
+                           re.match(r"\d{3,4}p", bdi_clean):
+                            group.quality = bdi_clean
+                        elif "MP4" in bdi_clean or "MKV" in bdi_clean:
+                            group.format = bdi_clean
+                        elif "مگابایت" in bdi_clean or "گیگابایت" in bdi_clean:
+                            group.size = bdi_clean
 
-        return links[:25]  # limit
+                # Detect type
+                item_classes = item.get("class", [])
+                if "dub-box" in item_classes:
+                    group.dtype = "dub"
+                else:
+                    group.dtype = "orig"
+
+                # Find download links
+                for a in item.select("a.-btn-dl"):
+                    href = a.get("href", "").strip()
+                    text = a.get_text(strip=True)
+                    if not href or href.startswith("#") or href.startswith("/watch/"):
+                        continue
+                    abs_url = self._make_absolute_url(href)
+                    if "/panel/charge" in href:
+                        group.links.append({"label": "ویژه", "url": abs_url, "premium": True})
+                    else:
+                        label = f"S{ep.season}E{ep.episode}"
+                        if group.dtype == "dub":
+                            label += " دوبله"
+                        group.links.append({"label": label, "url": abs_url, "premium": False})
+
+                # Find subtitle links
+                for a in item.select('a[href*="/subtitles/"]'):
+                    href = a.get("href", "").strip()
+                    text = a.get_text(strip=True)
+                    if href:
+                        abs_url = self._make_absolute_url(href)
+                        group.subtitles.append({"label": text, "url": abs_url})
+
+                if group.quality or group.links:
+                    ep.download_groups.append(group)
+
+            if ep.season is not None:
+                if ep.season not in season_eps:
+                    season_eps[ep.season] = []
+                season_eps[ep.season].append(ep)
+                episodes.append(ep)
+
+        # Build seasons list
+        for season_num in sorted(season_eps.keys()):
+            eps = season_eps[season_num]
+            seasons.append({
+                "season": season_num,
+                "episodes": len(eps),
+                "label": f"فصل {season_num}",
+            })
+
+        # Sort episodes: latest first within each season
+        episodes.sort(key=lambda e: (e.season or 0, e.episode or 0), reverse=True)
+        return episodes, seasons
 
     def _extract_genres(self, soup: BeautifulSoup) -> Optional[str]:
         """Extract genre list from genre links."""

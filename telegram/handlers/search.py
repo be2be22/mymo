@@ -75,7 +75,7 @@ async def handle_search_query(
     cached = await cache.get(cache_key)
     if cached is not None:
         logger.info("Search cache hit for '{}'", query)
-        await _send_search_results(message, cached, query, session=session)
+        await _send_search_results(message, cached, query)
         return
 
     wait_msg = await message.answer("⏳ در حال جستجو...")
@@ -93,7 +93,6 @@ async def handle_search_query(
         return
 
     if not results:
-        # Keep the state as waiting_for_query so user can search again
         from telegram.safe_edit import safe_edit_message
         await safe_edit_message(
             wait_msg,
@@ -123,7 +122,7 @@ async def handle_search_query(
         )
 
     await cache.set(cache_key, items)
-    await _send_search_results(message, items, query, wait_msg, session)
+    await _send_search_results(message, items, query, wait_msg)
 
 
 async def _send_search_results(
@@ -131,7 +130,6 @@ async def _send_search_results(
     items: list[dict],
     query: str,
     wait_msg: "Message | None" = None,
-    session=None,
 ) -> None:
     """Render search results to the user."""
     text_lines = [f"🔎 <b>نتایج جستجو برای «{query}»</b>\n"]
@@ -140,7 +138,7 @@ async def _send_search_results(
         text_lines.append("➖➖➖➖➖➖➖➖➖➖")
     text = "\n".join(text_lines)[:4000]
 
-    kb = await search_results_kb(items, session)
+    kb = search_results_kb(items)
     from telegram.safe_edit import safe_edit_message
     if wait_msg is not None:
         success = await safe_edit_message(wait_msg, text, reply_markup=kb)

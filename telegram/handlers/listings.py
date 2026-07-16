@@ -26,7 +26,6 @@ async def _show_listing(
     items: list[dict],
     title: str,
     cache_key: str,
-    session=None,
 ) -> None:
     """Render a generic listing."""
     if not items:
@@ -44,88 +43,74 @@ async def _show_listing(
         lines.append("➖➖➖➖➖➖➖➖➖➖")
     text = "\n".join(lines)[:4000]
     await cache.set(cache_key, items)
-    kb = await search_results_kb(items, session)
+    kb = search_results_kb(items)
     await safe_edit_message(callback.message, text, reply_markup=kb)
     await callback.answer()
 
 
 @router.callback_query(lambda c: c.data == "list:movies")
-async def cb_list_movies(callback: CallbackQuery, session=None) -> None:
+async def cb_list_movies(callback: CallbackQuery) -> None:
     """Show latest movies."""
     cache_key = "list:movies"
     cached = await cache.get(cache_key)
     if cached:
-        await _show_listing(callback, cached, "🎬 فیلم‌های اخیر - ", cache_key, session)
+        await _show_listing(callback, cached, "🎬 فیلم‌های اخیر - ", cache_key)
         return
     try:
         results = await scraper_manager.get_latest_movies(limit=15)
     except Exception as exc:
         logger.error("list movies failed: {}", exc)
         await safe_edit_message(
-            callback.message,
-            "❌ خطا در دریافت فهرست فیلم‌ها.",
-            reply_markup=back_to_main_kb(),
+            callback.message, "❌ خطا در دریافت فهرست فیلم‌ها.", reply_markup=back_to_main_kb()
         )
         await callback.answer()
         return
     items = [
         {
-            "title_fa": r.title_fa,
-            "title_en": r.title_en,
-            "year": r.year,
-            "imdb_rating": r.imdb_rating,
-            "content_type": r.content_type,
-            "poster_url": r.poster_url,
-            "page_url": r.page_url,
-            "mymoviz_id": r.mymoviz_id,
+            "title_fa": r.title_fa, "title_en": r.title_en, "year": r.year,
+            "imdb_rating": r.imdb_rating, "content_type": r.content_type,
+            "poster_url": r.poster_url, "page_url": r.page_url, "mymoviz_id": r.mymoviz_id,
         }
         for r in results
     ]
-    await _show_listing(callback, items, "🎬 فیلم‌های اخیر - ", cache_key, session)
+    await _show_listing(callback, items, "🎬 فیلم‌های اخیر - ", cache_key)
 
 
 @router.callback_query(lambda c: c.data == "list:series")
-async def cb_list_series(callback: CallbackQuery, session=None) -> None:
+async def cb_list_series(callback: CallbackQuery) -> None:
     """Show latest series."""
     cache_key = "list:series"
     cached = await cache.get(cache_key)
     if cached:
-        await _show_listing(callback, cached, "📺 سریال‌های اخیر - ", cache_key, session)
+        await _show_listing(callback, cached, "📺 سریال‌های اخیر - ", cache_key)
         return
     try:
         results = await scraper_manager.get_latest_series(limit=15)
     except Exception as exc:
         logger.error("list series failed: {}", exc)
         await safe_edit_message(
-            callback.message,
-            "❌ خطا در دریافت فهرست سریال‌ها.",
-            reply_markup=back_to_main_kb(),
+            callback.message, "❌ خطا در دریافت فهرست سریال‌ها.", reply_markup=back_to_main_kb()
         )
         await callback.answer()
         return
     items = [
         {
-            "title_fa": r.title_fa,
-            "title_en": r.title_en,
-            "year": r.year,
-            "imdb_rating": r.imdb_rating,
-            "content_type": r.content_type,
-            "poster_url": r.poster_url,
-            "page_url": r.page_url,
-            "mymoviz_id": r.mymoviz_id,
+            "title_fa": r.title_fa, "title_en": r.title_en, "year": r.year,
+            "imdb_rating": r.imdb_rating, "content_type": r.content_type,
+            "poster_url": r.poster_url, "page_url": r.page_url, "mymoviz_id": r.mymoviz_id,
         }
         for r in results
     ]
-    await _show_listing(callback, items, "📺 سریال‌های اخیر - ", cache_key, session)
+    await _show_listing(callback, items, "📺 سریال‌های اخیر - ", cache_key)
 
 
 @router.callback_query(lambda c: c.data == "list:latest")
-async def cb_list_latest(callback: CallbackQuery, session=None) -> None:
-    """Show latest releases (combined movies + series)."""
+async def cb_list_latest(callback: CallbackQuery) -> None:
+    """Show latest releases."""
     cache_key = "list:latest"
     cached = await cache.get(cache_key)
     if cached:
-        await _show_listing(callback, cached, "🕒 آخرین انتشارها - ", cache_key, session)
+        await _show_listing(callback, cached, "🕒 آخرین انتشارها - ", cache_key)
         return
     try:
         movies = await scraper_manager.get_latest_movies(limit=10)
@@ -133,62 +118,48 @@ async def cb_list_latest(callback: CallbackQuery, session=None) -> None:
     except Exception as exc:
         logger.error("list latest failed: {}", exc)
         await safe_edit_message(
-            callback.message,
-            "❌ خطا در دریافت آخرین انتشارها.",
-            reply_markup=back_to_main_kb(),
+            callback.message, "❌ خطا در دریافت آخرین انتشارها.", reply_markup=back_to_main_kb()
         )
         await callback.answer()
         return
     results = movies + series
     items = [
         {
-            "title_fa": r.title_fa,
-            "title_en": r.title_en,
-            "year": r.year,
-            "imdb_rating": r.imdb_rating,
-            "content_type": r.content_type,
-            "poster_url": r.poster_url,
-            "page_url": r.page_url,
-            "mymoviz_id": r.mymoviz_id,
+            "title_fa": r.title_fa, "title_en": r.title_en, "year": r.year,
+            "imdb_rating": r.imdb_rating, "content_type": r.content_type,
+            "poster_url": r.poster_url, "page_url": r.page_url, "mymoviz_id": r.mymoviz_id,
         }
         for r in results
     ]
-    await _show_listing(callback, items, "🕒 آخرین انتشارها - ", cache_key, session)
+    await _show_listing(callback, items, "🕒 آخرین انتشارها - ", cache_key)
 
 
 @router.callback_query(lambda c: c.data == "list:popular")
-async def cb_list_popular(callback: CallbackQuery, session=None) -> None:
+async def cb_list_popular(callback: CallbackQuery) -> None:
     """Show popular content."""
     cache_key = "list:popular"
     cached = await cache.get(cache_key)
     if cached:
-        await _show_listing(callback, cached, "🔥 محبوب‌ترین‌ها - ", cache_key, session)
+        await _show_listing(callback, cached, "🔥 محبوب‌ترین‌ها - ", cache_key)
         return
     try:
         results = await scraper_manager.get_popular(limit=15)
     except Exception as exc:
         logger.error("list popular failed: {}", exc)
         await safe_edit_message(
-            callback.message,
-            "❌ خطا در دریافت محبوب‌ترین‌ها.",
-            reply_markup=back_to_main_kb(),
+            callback.message, "❌ خطا در دریافت محبوب‌ترین‌ها.", reply_markup=back_to_main_kb()
         )
         await callback.answer()
         return
     items = [
         {
-            "title_fa": r.title_fa,
-            "title_en": r.title_en,
-            "year": r.year,
-            "imdb_rating": r.imdb_rating,
-            "content_type": r.content_type,
-            "poster_url": r.poster_url,
-            "page_url": r.page_url,
-            "mymoviz_id": r.mymoviz_id,
+            "title_fa": r.title_fa, "title_en": r.title_en, "year": r.year,
+            "imdb_rating": r.imdb_rating, "content_type": r.content_type,
+            "poster_url": r.poster_url, "page_url": r.page_url, "mymoviz_id": r.mymoviz_id,
         }
         for r in results
     ]
-    await _show_listing(callback, items, "🔥 محبوب‌ترین‌ها - ", cache_key, session)
+    await _show_listing(callback, items, "🔥 محبوب‌ترین‌ها - ", cache_key)
 
 
 @router.callback_query(lambda c: c.data == "downloads:status")

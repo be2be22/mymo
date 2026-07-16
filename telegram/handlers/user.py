@@ -75,7 +75,7 @@ async def cmd_help(message: Message) -> None:
 
 @router.callback_query(lambda c: c.data == "menu:main")
 async def cb_main_menu(callback: CallbackQuery, session: AsyncSession, db_user: User) -> None:
-    """Handle '🏠 خانه' callback."""
+    """Handle '🏠 خانه' callback - delete photo messages and send fresh text menu."""
     fav_count = len(await FavoriteRepository.list_by_user(session, db_user.id))
     sub_count = len(await SubscriptionRepository.list_by_user(session, db_user.id))
     text = (
@@ -83,8 +83,14 @@ async def cb_main_menu(callback: CallbackQuery, session: AsyncSession, db_user: 
         f"⭐ علاقه‌مندی‌های شما: {fav_count}\n"
         f"🔔 اعلان‌های فعال شما: {sub_count}"
     )
-    from telegram.safe_edit import safe_edit_message
-    await safe_edit_message(callback.message, text, reply_markup=main_menu_kb())
+    from telegram.safe_edit import safe_edit_message, safe_delete_message
+    # If the current message is a photo, delete it and send a fresh text message.
+    # This prevents old posters from lingering when user returns to main menu.
+    if callback.message.photo:
+        await safe_delete_message(callback.message)
+        await callback.message.answer(text, reply_markup=main_menu_kb())
+    else:
+        await safe_edit_message(callback.message, text, reply_markup=main_menu_kb())
     await callback.answer()
 
 
