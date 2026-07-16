@@ -264,3 +264,24 @@ class Notification(Base):
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"<Notification(id={self.id}, type={self.notification_type})>"
+
+
+class CallbackMapping(Base):
+    """Short-key -> (content_type, mymoviz_id) mapping for Telegram callback_data.
+
+    Telegram limits ``callback_data`` to 64 bytes. Some MyMoviz IDs are
+    very long (e.g. ``tvshows/tt43357366/The-Apartment-Job-2026`` = 41 chars),
+    so we hash them to 8 chars and store the mapping here. Entries are
+    cleaned up periodically (default: every 10 minutes) by the scheduler.
+    """
+
+    __tablename__ = "callback_mappings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    short_key: Mapped[str] = mapped_column(String(16), unique=True, index=True, nullable=False)
+    content_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    mymoviz_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<CallbackMapping(short={self.short_key}, type={self.content_type})>"

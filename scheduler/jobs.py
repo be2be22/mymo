@@ -22,6 +22,7 @@ from config.settings import settings
 from database.database import db_manager
 from database.models import ContentType, NotificationType
 from database.repositories import (
+    CallbackMappingRepository,
     EpisodeRepository,
     MovieRepository,
     NotificationRepository,
@@ -105,6 +106,17 @@ async def run_check_now() -> None:
         # Cache cleanup
         from cache.cache_manager import cache
         await cache.cleanup_expired()
+
+        # Cleanup expired callback mappings (older than 10 minutes)
+        try:
+            async with db_manager.session() as session:
+                deleted = await CallbackMappingRepository.cleanup_expired(
+                    session, max_age_minutes=10
+                )
+                if deleted > 0:
+                    logger.info("Cleaned up {} expired callback mappings", deleted)
+        except Exception as exc:
+            logger.debug("Callback mapping cleanup failed: {}", exc)
 
         logger.info("✅ Scheduler tick complete.")
     except Exception as exc:

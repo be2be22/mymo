@@ -25,6 +25,7 @@ async def _show_listing(
     items: list[dict],
     title: str,
     cache_key: str,
+    session=None,
 ) -> None:
     """Render a generic listing."""
     if not items:
@@ -41,19 +42,20 @@ async def _show_listing(
         lines.append("➖➖➖➖➖➖➖➖➖➖")
     text = "\n".join(lines)[:4000]
     await cache.set(cache_key, items)
+    kb = await search_results_kb(items, session)
     await callback.message.edit_text(
-        text, reply_markup=search_results_kb(items), disable_web_page_preview=True
+        text, reply_markup=kb, disable_web_page_preview=True
     )
     await callback.answer()
 
 
 @router.callback_query(lambda c: c.data == "list:movies")
-async def cb_list_movies(callback: CallbackQuery) -> None:
+async def cb_list_movies(callback: CallbackQuery, session=None) -> None:
     """Show latest movies."""
     cache_key = "list:movies"
     cached = await cache.get(cache_key)
     if cached:
-        await _show_listing(callback, cached, "🎬 فیلم‌های اخیر - ", cache_key)
+        await _show_listing(callback, cached, "🎬 فیلم‌های اخیر - ", cache_key, session)
         return
     try:
         results = await scraper_manager.get_latest_movies(limit=15)
@@ -78,16 +80,16 @@ async def cb_list_movies(callback: CallbackQuery) -> None:
         }
         for r in results
     ]
-    await _show_listing(callback, items, "🎬 فیلم‌های اخیر - ", cache_key)
+    await _show_listing(callback, items, "🎬 فیلم‌های اخیر - ", cache_key, session)
 
 
 @router.callback_query(lambda c: c.data == "list:series")
-async def cb_list_series(callback: CallbackQuery) -> None:
+async def cb_list_series(callback: CallbackQuery, session=None) -> None:
     """Show latest series."""
     cache_key = "list:series"
     cached = await cache.get(cache_key)
     if cached:
-        await _show_listing(callback, cached, "📺 سریال‌های اخیر - ", cache_key)
+        await _show_listing(callback, cached, "📺 سریال‌های اخیر - ", cache_key, session)
         return
     try:
         results = await scraper_manager.get_latest_series(limit=15)
@@ -112,16 +114,16 @@ async def cb_list_series(callback: CallbackQuery) -> None:
         }
         for r in results
     ]
-    await _show_listing(callback, items, "📺 سریال‌های اخیر - ", cache_key)
+    await _show_listing(callback, items, "📺 سریال‌های اخیر - ", cache_key, session)
 
 
 @router.callback_query(lambda c: c.data == "list:latest")
-async def cb_list_latest(callback: CallbackQuery) -> None:
+async def cb_list_latest(callback: CallbackQuery, session=None) -> None:
     """Show latest releases (combined movies + series)."""
     cache_key = "list:latest"
     cached = await cache.get(cache_key)
     if cached:
-        await _show_listing(callback, cached, "🕒 آخرین انتشارها - ", cache_key)
+        await _show_listing(callback, cached, "🕒 آخرین انتشارها - ", cache_key, session)
         return
     try:
         movies = await scraper_manager.get_latest_movies(limit=10)
@@ -148,16 +150,16 @@ async def cb_list_latest(callback: CallbackQuery) -> None:
         }
         for r in results
     ]
-    await _show_listing(callback, items, "🕒 آخرین انتشارها - ", cache_key)
+    await _show_listing(callback, items, "🕒 آخرین انتشارها - ", cache_key, session)
 
 
 @router.callback_query(lambda c: c.data == "list:popular")
-async def cb_list_popular(callback: CallbackQuery) -> None:
+async def cb_list_popular(callback: CallbackQuery, session=None) -> None:
     """Show popular content."""
     cache_key = "list:popular"
     cached = await cache.get(cache_key)
     if cached:
-        await _show_listing(callback, cached, "🔥 محبوب‌ترین‌ها - ", cache_key)
+        await _show_listing(callback, cached, "🔥 محبوب‌ترین‌ها - ", cache_key, session)
         return
     try:
         results = await scraper_manager.get_popular(limit=15)
@@ -182,7 +184,7 @@ async def cb_list_popular(callback: CallbackQuery) -> None:
         }
         for r in results
     ]
-    await _show_listing(callback, items, "🔥 محبوب‌ترین‌ها - ", cache_key)
+    await _show_listing(callback, items, "🔥 محبوب‌ترین‌ها - ", cache_key, session)
 
 
 @router.callback_query(lambda c: c.data == "downloads:status")

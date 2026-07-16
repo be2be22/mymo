@@ -34,7 +34,7 @@ router = Router(name="movie")
 
 # ----------------------------------------------------------------------
 # Detail callback: d:<short_key>
-# Uses short 8-char hash mapped to (content_type, mymoviz_id) via _ID_MAP
+# Uses short 8-char hash mapped to (content_type, mymoviz_id) via DB
 # to stay within Telegram's 64-byte callback_data limit.
 # ----------------------------------------------------------------------
 @router.callback_query(lambda c: c.data and c.data.startswith("d:"))
@@ -43,8 +43,8 @@ async def cb_detail(
 ) -> None:
     """Open the detail page for a movie or series."""
     short_key = callback.data[2:]  # strip "d:"
-    from telegram.keyboards import resolve_short_key
-    resolved = resolve_short_key(short_key)
+    from database.repositories import CallbackMappingRepository
+    resolved = await CallbackMappingRepository.resolve(session, short_key)
     if not resolved:
         await callback.answer("❌ نشست منقضی شده. دوباره جستجو کنید.", show_alert=True)
         return
@@ -195,9 +195,10 @@ async def _render_detail(
         # Note: SubscriptionRepository.exists was used; ensure method exists
         # If not exists() method, fallback to list check below.
 
-    kb = content_detail_kb(
+    kb = await content_detail_kb(
         content_type=content_type,
         mymoviz_id=mymoviz_id,
+        session=session,
         site_url=d.get("page_url"),
         is_favorite=is_fav,
         is_subscribed=is_sub,
@@ -228,8 +229,8 @@ async def cb_favorite(
 ) -> None:
     """Toggle favorite status for a content item."""
     short_key = callback.data[4:]
-    from telegram.keyboards import resolve_short_key
-    resolved = resolve_short_key(short_key)
+    from database.repositories import CallbackMappingRepository
+    resolved = await CallbackMappingRepository.resolve(session, short_key)
     if not resolved:
         await callback.answer("❌ نشست منقضی شده.", show_alert=True)
         return
@@ -276,8 +277,8 @@ async def cb_subscribe(
 ) -> None:
     """Toggle subscription for a content item."""
     short_key = callback.data[4:]
-    from telegram.keyboards import resolve_short_key
-    resolved = resolve_short_key(short_key)
+    from database.repositories import CallbackMappingRepository
+    resolved = await CallbackMappingRepository.resolve(session, short_key)
     if not resolved:
         await callback.answer("❌ نشست منقضی شده.", show_alert=True)
         return
@@ -341,9 +342,10 @@ async def cb_favorites_list(
                 }
             )
     from telegram.keyboards import favorites_list_kb
+    kb = await favorites_list_kb(items, session)
     await callback.message.edit_text(
         f"⭐ <b>علاقه‌مندی‌های شما ({len(items)})</b>",
-        reply_markup=favorites_list_kb(items),
+        reply_markup=kb,
     )
     await callback.answer()
 
@@ -385,9 +387,10 @@ async def cb_subscriptions_list(
                 }
             )
     from telegram.keyboards import subscriptions_list_kb
+    kb = await subscriptions_list_kb(items, session)
     await callback.message.edit_text(
         f"🔔 <b>اعلان‌های فعال شما ({len(items)})</b>",
-        reply_markup=subscriptions_list_kb(items),
+        reply_markup=kb,
     )
     await callback.answer()
 
@@ -399,8 +402,8 @@ async def cb_subscriptions_list(
 async def cb_download(callback: CallbackQuery, session: AsyncSession) -> None:
     """Show download links - tries to scrape actual links from MyMoviz."""
     short_key = callback.data[3:]
-    from telegram.keyboards import resolve_short_key
-    resolved = resolve_short_key(short_key)
+    from database.repositories import CallbackMappingRepository
+    resolved = await CallbackMappingRepository.resolve(session, short_key)
     if not resolved:
         await callback.answer("❌ نشست منقضی شده.", show_alert=True)
         return

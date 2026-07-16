@@ -3,6 +3,7 @@
 from database.database import DatabaseManager, db_manager, init_db
 from database.models import (
     Base,
+    CallbackMapping,
     Episode,
     Favorite,
     Movie,
@@ -14,6 +15,7 @@ from database.models import (
 
 __all__ = [
     "Base",
+    "CallbackMapping",
     "DatabaseManager",
     "db_manager",
     "Episode",

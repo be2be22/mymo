@@ -14,6 +14,7 @@ from sqlalchemy import and_, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.models import (
+    CallbackMapping,
     ContentType,
     Episode,
     Favorite,
@@ -454,7 +455,78 @@ class NotificationRepository:
         return int(result.scalar_one())
 
 
+class CallbackMappingRepository:
+    """CRUD operations for :class:`CallbackMapping` (short-key -> content mapping).
+
+    Telegram limits callback_data to 64 bytes. We hash long mymoviz_id
+    values to 8-char keys and store the mapping in the database so it
+    survives bot restarts. Entries are cleaned up periodically.
+    """
+
+    @staticmethod
+    async def get_or_create(
+        session: AsyncSession,
+        content_type: str,
+        mymoviz_id: str,
+    ) -> str:
+        """Return the short key for a content item, creating the mapping if needed."""
+        import hashlib
+
+        # Generate deterministic short key from content_type + mymoviz_id
+        raw = f"{content_type}:{mymoviz_id}"
+        short_key = hashlib.md5(raw.encode("utf-8")).hexdigest()[:8]
+
+        # Check if already exists
+        stmt = select(CallbackMapping).where(CallbackMapping.short_key == short_key)
+        result = await session.execute(stmt)
+        existing = result.scalar_one_or_none()
+        if existing is None:
+            mapping = CallbackMapping(
+                short_key=short_key,
+                content_type=content_type,
+                mymoviz_id=mymoviz_id,
+            )
+            session.add(mapping)
+            try:
+                await session.flush()
+            except Exception:
+                # Race condition - another request created it. Ignore.
+                await session.rollback()
+        return short_key
+
+    @staticmethod
+    async def resolve(
+        session: AsyncSession, short_key: str
+    ) -> Optional[tuple[str, str]]:
+        """Resolve a short key back to (content_type, mymoviz_id)."""
+        if not short_key:
+            return None
+        stmt = select(CallbackMapping).where(CallbackMapping.short_key == short_key)
+        result = await session.execute(stmt)
+        mapping = result.scalar_one_or_none()
+        if mapping is None:
+            return None
+        return (mapping.content_type, mapping.mymoviz_id)
+
+    @staticmethod
+    async def cleanup_expired(
+        session: AsyncSession, max_age_minutes: int = 10
+    ) -> int:
+        """Delete callback mappings older than ``max_age_minutes``.
+
+        Returns the number of deleted rows.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
+        # CallbackMapping.created_at uses server_default=func.now() which is UTC
+        stmt = delete(CallbackMapping).where(CallbackMapping.created_at < cutoff)
+        result = await session.execute(stmt)
+        return result.rowcount or 0
+
+
 __all__ = [
+    "CallbackMappingRepository",
     "EpisodeRepository",
     "FavoriteRepository",
     "MovieRepository",
