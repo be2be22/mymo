@@ -492,15 +492,20 @@ class ClassicScraper(BaseScraper):
         detail.has_dubbing = "دوبله" in text
         detail.has_subtitle = "زیرنویس" in text
 
-        # ----- Download links -----
+        # ----- Download links (movie-style) -----
         detail.download_groups, detail.download_links = self._parse_movie_downloads(soup)
 
-        # ----- Episodes (for series) -----
-        if content_type == "series":
-            detail.episodes, detail.seasons = self._parse_episodes_with_downloads(soup)
-            if detail.episodes:
-                ep = detail.episodes[0]
-                detail.latest_episode = f"فصل {ep.season or '?'} قسمت {ep.episode or '?'}"
+        # ----- Episodes (series) -----
+        # Always try to parse episodes - if the page has them, it's a series.
+        # We can't rely on the content_type parameter because the caller may
+        # pass "movie" even for series URLs (e.g. when using /tt<ID> which
+        # works for both).
+        detail.episodes, detail.seasons = self._parse_episodes_with_downloads(soup)
+        if detail.episodes:
+            # This is actually a series (has episodes)
+            detail.content_type = "series"
+            ep = detail.episodes[0]
+            detail.latest_episode = f"فصل {ep.season or '?'} قسمت {ep.episode or '?'}"
 
         # ----- Raw hash for change detection -----
         body_text = soup.get_text(" ", strip=True)

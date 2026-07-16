@@ -68,9 +68,11 @@ async def cb_detail(
     await safe_edit_message(callback.message, "⏳ در حال دریافت اطلاعات...")
 
     # Fetch detail page using just the IMDb ID (works for both movies and series)
+    # Always pass "movie" first - the scraper will detect episodes and set
+    # content_type="series" automatically if the page is a series.
     detail = await scraper_manager.get_content_detail(imdb_id, "movie")
     if not detail:
-        # Try as series
+        # Try as series explicitly
         detail = await scraper_manager.get_content_detail(imdb_id, "series")
 
     if not detail:
@@ -82,10 +84,10 @@ async def cb_detail(
         await callback.answer()
         return
 
-    # Determine content type from URL or episodes
-    if detail.page_url and "/tvshows/" in detail.page_url:
+    # Determine content type - prefer the scraper's auto-detection
+    if detail.content_type == "series" or detail.episodes:
         content_type_str = "series"
-    elif detail.episodes:
+    elif detail.page_url and "/tvshows/" in detail.page_url:
         content_type_str = "series"
     else:
         content_type_str = "movie"
