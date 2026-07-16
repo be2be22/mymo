@@ -93,7 +93,8 @@ async def cb_detail(
     detail.content_type = content_type_str
 
     # Persist to database
-    data = {
+    # Note: Movie model doesn't have 'latest_episode' field, only Series does.
+    base_data = {
         "mymoviz_id": detail.mymoviz_id or imdb_id,
         "title_fa": detail.title_fa,
         "title_en": detail.title_en,
@@ -108,14 +109,16 @@ async def cb_detail(
         "qualities": detail.qualities,
         "has_dubbing": detail.has_dubbing,
         "has_subtitle": detail.has_subtitle,
-        "latest_episode": detail.latest_episode,
         "raw_hash": detail.raw_hash,
     }
     if content_type == ContentType.MOVIE:
-        movie = await MovieRepository.upsert(session, data)
+        movie = await MovieRepository.upsert(session, base_data)
         db_id = movie.id
     else:
-        series = await SeriesRepository.upsert(session, data)
+        # Series has an extra 'latest_episode' field
+        series_data = dict(base_data)
+        series_data["latest_episode"] = detail.latest_episode
+        series = await SeriesRepository.upsert(session, series_data)
         db_id = series.id
 
     payload = {
