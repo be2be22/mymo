@@ -68,6 +68,7 @@ class ContentDetail:
     latest_episode: Optional[str] = None
     episodes: List[EpisodeDetail] = field(default_factory=list)
     raw_hash: Optional[str] = None  # used to detect ANY change
+    download_links: List[dict] = field(default_factory=list)  # [{"label":..., "url":..., "quality":...}]
 
 
 class BaseScraper(abc.ABC):

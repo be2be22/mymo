@@ -64,7 +64,10 @@ async def handle_search_query(
         )
         return
 
-    await state.clear()
+    # NOTE: Do NOT clear the state yet - keep it as waiting_for_query so the
+    # user can search again if no results are found or if they want to try
+    # a different query. State will be cleared when user clicks a result,
+    # presses Cancel, or returns to main menu.
 
     cache_key = f"search:{query.lower()}"
     cached = await cache.get(cache_key)
@@ -80,18 +83,22 @@ async def handle_search_query(
     except Exception as exc:
         logger.error("Search failed for '{}': {}", query, exc)
         await wait_msg.edit_text(
-            "❌ خطا در جستجو. لطفاً بعداً دوباره تلاش کنید.",
-            reply_markup=back_to_main_kb(),
+            "❌ خطا در جستجو. لطفاً دوباره تلاش کنید یا نام دیگری وارد کنید.",
+            reply_markup=cancel_kb(),
         )
         return
 
     if not results:
+        # Keep the state as waiting_for_query so user can search again
         await wait_msg.edit_text(
             f"🔍 نتیجه‌ای برای «<b>{query}</b>» یافت نشد.\n"
-            "💡 امتحان کنید با نام دقیق‌تر یا انگلیسی دوباره جستجو کنید.",
-            reply_markup=back_to_main_kb(),
+            "💡 نام دیگری وارد کنید یا با نام انگلیسی امتحان کنید:",
+            reply_markup=cancel_kb(),
         )
         return
+
+    # Now that we have results, clear the state
+    await state.clear()
 
     # Convert to plain dicts for cache + keyboard
     items: list[dict] = []

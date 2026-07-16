@@ -3,12 +3,15 @@ Inline keyboards (glass-style buttons) for the bot UI.
 
 All keyboards use ``InlineKeyboardMarkup`` with concise Persian labels and
 emoji icons. Callback data is kept short to stay within Telegram's 64-byte
-limit.
+limit. Long ``mymoviz_id`` values (e.g. ``tvshows/tt43357366/The-Apartment-Job-2026``)
+are replaced with a short MD5 hash, and the mapping is stored in
+``_ID_MAP`` so handlers can recover the original ID.
 """
 
 from __future__ import annotations
 
-from typing import List, Optional
+import hashlib
+from typing import Dict, List, Optional
 
 from aiogram.types import (
     InlineKeyboardButton,
@@ -17,6 +20,35 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from database.models import ContentType
+
+
+# ---------------------------------------------------------------------
+# Short ID mapping - maps short hash -> full mymoviz_id + content_type
+# Telegram callback_data is limited to 64 bytes, so we cannot embed the
+# full mymoviz_id (which can be 40+ chars) in the callback_data.
+# Instead, we hash it to 8 chars and store the mapping here.
+# ---------------------------------------------------------------------
+_ID_MAP: Dict[str, tuple[str, str]] = {}  # short_key -> (content_type, mymoviz_id)
+_MAX_MAP_SIZE = 5000  # prevent unbounded growth
+
+
+def make_short_key(content_type: str, mymoviz_id: str) -> str:
+    """Generate a short 8-char key for a content item and store the mapping."""
+    raw = f"{content_type}:{mymoviz_id}"
+    short = hashlib.md5(raw.encode("utf-8")).hexdigest()[:8]
+    _ID_MAP[short] = (content_type, mymoviz_id)
+    # Evict oldest entries if map is too large
+    if len(_ID_MAP) > _MAX_MAP_SIZE:
+        # Remove ~10% of entries (oldest inserted)
+        keys_to_remove = list(_ID_MAP.keys())[: _MAX_MAP_SIZE // 10]
+        for k in keys_to_remove:
+            _ID_MAP.pop(k, None)
+    return short
+
+
+def resolve_short_key(short_key: str) -> Optional[tuple[str, str]]:
+    """Resolve a short key back to (content_type, mymoviz_id)."""
+    return _ID_MAP.get(short_key)
 
 
 def main_menu_kb() -> InlineKeyboardMarkup:
@@ -69,9 +101,11 @@ def search_results_kb(results: List[dict]) -> InlineKeyboardMarkup:
         label = label[:60]
         mymoviz_id = item.get("mymoviz_id") or ""
         ct = item.get("content_type", "movie")
+        # Use short key to keep callback_data under 64 bytes
+        short = make_short_key(ct, mymoviz_id)
         builder.button(
             text=label,
-            callback_data=f"detail:{ct}:{mymoviz_id}",
+            callback_data=f"d:{short}",
         )
     builder.adjust(1)
     builder.button(text="🏠 خانه", callback_data="menu:main")
@@ -91,9 +125,11 @@ def content_detail_kb(
     fav_label = "❌ حذف از علاقه‌مندی" if is_favorite else "⭐ افزودن به علاقه‌مندی"
     sub_label = "❌ حذف اطلاع‌رسانی" if is_subscribed else "🔔 اطلاع بده"
 
-    builder.button(text=fav_label, callback_data=f"fav:{content_type.value}:{mymoviz_id}")
-    builder.button(text=sub_label, callback_data=f"sub:{content_type.value}:{mymoviz_id}")
-    builder.button(text="📥 دانلود", callback_data=f"dl:{content_type.value}:{mymoviz_id}")
+    # Use short key for all callbacks to stay under 64 bytes
+    short = make_short_key(content_type.value, mymoviz_id)
+    builder.button(text=fav_label, callback_data=f"fav:{short}")
+    builder.button(text=sub_label, callback_data=f"sub:{short}")
+    builder.button(text="📥 دانلود", callback_data=f"dl:{short}")
     if site_url:
         builder.button(text="🌐 مشاهده سایت", url=site_url)
     builder.button(text="⬅ بازگشت", callback_data="search:start")
@@ -108,9 +144,11 @@ def favorites_list_kb(favorites: List[dict]) -> InlineKeyboardMarkup:
     for fav in favorites[:15]:
         icon = "🎬" if fav.get("content_type") == "movie" else "📺"
         title = fav.get("title") or "—"
+        ct = fav.get("content_type", "movie")
+        short = make_short_key(ct, fav.get("mymoviz_id", ""))
         builder.button(
             text=f"{icon} {title}"[:60],
-            callback_data=f"detail:{fav['content_type']}:{fav['mymoviz_id']}",
+            callback_data=f"d:{short}",
         )
     builder.adjust(1)
     builder.button(text="🏠 خانه", callback_data="menu:main")
@@ -123,9 +161,11 @@ def subscriptions_list_kb(subscriptions: List[dict]) -> InlineKeyboardMarkup:
     for sub in subscriptions[:15]:
         icon = "🎬" if sub.get("content_type") == "movie" else "📺"
         title = sub.get("title") or "—"
+        ct = sub.get("content_type", "movie")
+        short = make_short_key(ct, sub.get("mymoviz_id", ""))
         builder.button(
             text=f"{icon} {title}"[:60],
-            callback_data=f"detail:{sub['content_type']}:{sub['mymoviz_id']}",
+            callback_data=f"d:{short}",
         )
     builder.adjust(1)
     builder.button(text="🏠 خانه", callback_data="menu:main")

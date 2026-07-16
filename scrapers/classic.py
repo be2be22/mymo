@@ -216,6 +216,8 @@ class ClassicScraper(BaseScraper):
         img = card.find("img")
         if img:
             poster = img.get("data-src") or img.get("src") or img.get("data-original")
+            if poster:
+                poster = poster.replace("/./", "/")
             poster = self._make_absolute_url(poster)
 
         # Titles: MyMoviz has both Persian (movie-titlep) and English (movie-title)
@@ -351,12 +353,15 @@ class ClassicScraper(BaseScraper):
         for img in soup.select("article.box-movie-details img, .box-movie-details-header img, img[data-src]"):
             src = img.get("data-src") or img.get("src")
             if src and "cover" in src and "tt" in src:
+                # Fix MyMoviz's weird /./ in path (e.g. /./images/ -> /images/)
+                src = src.replace("/./", "/")
                 detail.poster_url = self._make_absolute_url(src)
                 break
         if not detail.poster_url:
             for img in soup.select("img[data-src]"):
                 src = img.get("data-src") or img.get("src")
                 if src and "cover" in src:
+                    src = src.replace("/./", "/")
                     detail.poster_url = self._make_absolute_url(src)
                     break
 
@@ -461,6 +466,9 @@ class ClassicScraper(BaseScraper):
         detail.has_dubbing = "دوبله" in text
         detail.has_subtitle = "زیرنویس" in text
 
+        # ----- Download links -----
+        detail.download_links = self._parse_download_links(soup)
+
         # ----- Episodes (for series) -----
         if content_type == "series":
             detail.episodes = self._parse_episodes(soup)
@@ -473,6 +481,70 @@ class ClassicScraper(BaseScraper):
         detail.raw_hash = hashlib.md5(body_text.encode("utf-8")).hexdigest()[:16]
 
         return detail
+
+    def _parse_download_links(self, soup: BeautifulSoup) -> List[dict]:
+        """Extract actual download links from the detail page.
+
+        MyMoviz puts download links inside section.box-movie-download.
+        Each quality/version has a row with one or more <a> tags pointing
+        to the actual file URL. When not logged in, the links point to
+        /signin?type=doLogin instead.
+        """
+        links: List[dict] = []
+        seen_urls: set = set()
+
+        download_section = soup.select_one(
+            "section.box-movie-download, .box-movie-download, #download, .download-section"
+        )
+        if not download_section:
+            return links
+
+        # Find all <a> tags with href that look like download links
+        for a in download_section.find_all("a", href=True):
+            href = a.get("href", "").strip()
+            if not href:
+                continue
+            # Skip login redirects and anchors
+            if href.startswith("#") or "/signin" in href or "javascript:" in href:
+                continue
+            # Make absolute
+            abs_url = self._make_absolute_url(href)
+            if abs_url in seen_urls:
+                continue
+            seen_urls.add(abs_url)
+
+            # Try to determine the label and quality from surrounding text
+            label_text = a.get_text(strip=True)
+            # Look at parent for context (quality, size, etc.)
+            parent = a.find_parent(["div", "li", "tr", "p"])
+            parent_text = parent.get_text(" ", strip=True) if parent else label_text
+
+            # Extract quality from text (e.g. "BluRay 1080p", "480p", "720p")
+            quality = ""
+            q_match = re.search(
+                r"(BluRay|WEB-DL|WEBRip|HDTV|HDRip|CAM|DVDScr)\s*(\d{3,4}p)?",
+                parent_text, re.I,
+            )
+            if q_match:
+                quality = q_match.group(0)
+
+            # Determine label
+            if "دوبله" in parent_text or "Dubbed" in parent_text:
+                label = "دوبله فارسی"
+            elif "زیرنویس" in parent_text:
+                label = "زیرنویس"
+            elif label_text:
+                label = label_text[:40]
+            else:
+                label = "دانلود"
+
+            links.append({
+                "label": label,
+                "url": abs_url,
+                "quality": quality,
+            })
+
+        return links[:20]  # limit
 
     def _extract_genres(self, soup: BeautifulSoup) -> Optional[str]:
         """Extract genre list from genre links."""

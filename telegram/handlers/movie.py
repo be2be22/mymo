@@ -33,21 +33,22 @@ router = Router(name="movie")
 
 
 # ----------------------------------------------------------------------
-# Detail callback: detail:<content_type>:<mymoviz_id>
-# NOTE: mymoviz_id may contain ":" (e.g. "The-Bad-Guys:-Breaking-In-2025")
-# so we split with maxsplit=2 to keep the rest intact.
+# Detail callback: d:<short_key>
+# Uses short 8-char hash mapped to (content_type, mymoviz_id) via _ID_MAP
+# to stay within Telegram's 64-byte callback_data limit.
 # ----------------------------------------------------------------------
-@router.callback_query(lambda c: c.data and c.data.startswith("detail:"))
+@router.callback_query(lambda c: c.data and c.data.startswith("d:"))
 async def cb_detail(
     callback: CallbackQuery, session: AsyncSession, db_user: User
 ) -> None:
     """Open the detail page for a movie or series."""
-    parts = callback.data.split(":", 2)
-    if len(parts) < 3:
-        await callback.answer("❌ داده نامعتبر است.", show_alert=True)
+    short_key = callback.data[2:]  # strip "d:"
+    from telegram.keyboards import resolve_short_key
+    resolved = resolve_short_key(short_key)
+    if not resolved:
+        await callback.answer("❌ نشست منقضی شده. دوباره جستجو کنید.", show_alert=True)
         return
-    content_type_str = parts[1]
-    mymoviz_id = parts[2]
+    content_type_str, mymoviz_id = resolved
 
     if content_type_str not in ("movie", "series"):
         await callback.answer("❌ نوع نامعتبر است.", show_alert=True)
@@ -219,20 +220,20 @@ async def _render_detail(
 
 
 # ----------------------------------------------------------------------
-# Favorite callback: fav:<content_type>:<mymoviz_id>
-# NOTE: split with maxsplit=2 because mymoviz_id may contain ":"
+# Favorite callback: fav:<short_key>
 # ----------------------------------------------------------------------
 @router.callback_query(lambda c: c.data and c.data.startswith("fav:"))
 async def cb_favorite(
     callback: CallbackQuery, session: AsyncSession, db_user: User
 ) -> None:
     """Toggle favorite status for a content item."""
-    parts = callback.data.split(":", 2)
-    if len(parts) < 3:
-        await callback.answer("❌ داده نامعتبر است.", show_alert=True)
+    short_key = callback.data[4:]
+    from telegram.keyboards import resolve_short_key
+    resolved = resolve_short_key(short_key)
+    if not resolved:
+        await callback.answer("❌ نشست منقضی شده.", show_alert=True)
         return
-    content_type_str = parts[1]
-    mymoviz_id = parts[2]
+    content_type_str, mymoviz_id = resolved
     content_type = ContentType.MOVIE if content_type_str == "movie" else ContentType.SERIES
 
     # Find DB record
@@ -267,20 +268,20 @@ async def cb_favorite(
 
 
 # ----------------------------------------------------------------------
-# Subscription callback: sub:<content_type>:<mymoviz_id>
-# NOTE: split with maxsplit=2 because mymoviz_id may contain ":"
+# Subscription callback: sub:<short_key>
 # ----------------------------------------------------------------------
 @router.callback_query(lambda c: c.data and c.data.startswith("sub:"))
 async def cb_subscribe(
     callback: CallbackQuery, session: AsyncSession, db_user: User
 ) -> None:
     """Toggle subscription for a content item."""
-    parts = callback.data.split(":", 2)
-    if len(parts) < 3:
-        await callback.answer("❌ داده نامعتبر است.", show_alert=True)
+    short_key = callback.data[4:]
+    from telegram.keyboards import resolve_short_key
+    resolved = resolve_short_key(short_key)
+    if not resolved:
+        await callback.answer("❌ نشست منقضی شده.", show_alert=True)
         return
-    content_type_str = parts[1]
-    mymoviz_id = parts[2]
+    content_type_str, mymoviz_id = resolved
     content_type = ContentType.MOVIE if content_type_str == "movie" else ContentType.SERIES
 
     if content_type == ContentType.MOVIE:
@@ -392,53 +393,85 @@ async def cb_subscriptions_list(
 
 
 # ----------------------------------------------------------------------
-# Downloads: dl:<content_type>:<mymoviz_id>
+# Downloads: dl:<short_key>
 # ----------------------------------------------------------------------
 @router.callback_query(lambda c: c.data and c.data.startswith("dl:"))
 async def cb_download(callback: CallbackQuery, session: AsyncSession) -> None:
-    """Show download links (links to site)."""
-    parts = callback.data.split(":", 2)
-    if len(parts) < 3:
-        await callback.answer("❌ داده نامعتبر است.", show_alert=True)
+    """Show download links - tries to scrape actual links from MyMoviz."""
+    short_key = callback.data[3:]
+    from telegram.keyboards import resolve_short_key
+    resolved = resolve_short_key(short_key)
+    if not resolved:
+        await callback.answer("❌ نشست منقضی شده.", show_alert=True)
         return
-    content_type_str = parts[1]
-    mymoviz_id = parts[2]
+    content_type_str, mymoviz_id = resolved
 
+    await callback.answer("⏳ در حال دریافت لینک‌های دانلود...", show_alert=False)
+
+    # Get content from DB
     if content_type_str == "movie":
         movie = await MovieRepository.get_by_mymoviz_id(session, mymoviz_id)
         if not movie:
-            await callback.answer("❌ اطلاعاتی موجود نیست.", show_alert=True)
+            await callback.message.answer("❌ اطلاعاتی موجود نیست.", reply_markup=back_to_main_kb())
             return
+        title = movie.title_fa or movie.title_en or "فیلم"
         url = movie.page_url or ""
         qualities = movie.qualities or "نامشخص"
-        text = (
+        header = (
             f"📥 <b>دانلود فیلم</b>\n\n"
-            f"🎬 <b>{movie.title_fa or movie.title_en}</b>\n"
+            f"🎬 <b>{title}</b>\n"
             f"🎥 کیفیت‌ها: {qualities}\n"
             f"🎙 دوبله: {'✅' if movie.has_dubbing else '❌'}\n"
-            f"📝 زیرنویس: {'✅' if movie.has_subtitle else '❌'}\n\n"
-            "برای مشاهده لینک‌های دانلود به صفحه فیلم در سایت بروید:"
+            f"📝 زیرنویس: {'✅' if movie.has_subtitle else '❌'}\n"
         )
     else:
         series = await SeriesRepository.get_by_mymoviz_id(session, mymoviz_id)
         if not series:
-            await callback.answer("❌ اطلاعاتی موجود نیست.", show_alert=True)
+            await callback.message.answer("❌ اطلاعاتی موجود نیست.", reply_markup=back_to_main_kb())
             return
+        title = series.title_fa or series.title_en or "سریال"
         url = series.page_url or ""
         qualities = series.qualities or "نامشخص"
-        text = (
+        header = (
             f"📥 <b>دانلود سریال</b>\n\n"
-            f"📺 <b>{series.title_fa or series.title_en}</b>\n"
+            f"📺 <b>{title}</b>\n"
             f"🎥 کیفیت‌ها: {qualities}\n"
             f"🎙 دوبله: {'✅' if series.has_dubbing else '❌'}\n"
-            f"📝 زیرنویس: {'✅' if series.has_subtitle else '❌'}\n\n"
-            "برای مشاهده لینک‌های دانلود قسمت‌ها به صفحه سریال در سایت بروید:"
+            f"📝 زیرنویس: {'✅' if series.has_subtitle else '❌'}\n"
         )
 
+    # Try to scrape actual download links from the detail page
+    download_links: list[dict] = []
+    try:
+        from scrapers.manager import scraper_manager
+        detail = await scraper_manager.get_content_detail(mymoviz_id, content_type_str)
+        if detail and hasattr(detail, "download_links") and detail.download_links:
+            download_links = detail.download_links[:15]  # limit to 15 links
+    except Exception as exc:
+        logger.warning("Failed to scrape download links: {}", exc)
+
     builder = InlineKeyboardBuilder()
-    if url:
-        builder.add(InlineKeyboardButton(text="🌐 صفحه دانلود", url=url))
+
+    if download_links:
+        # Show actual download links as buttons
+        header += "\n📋 <b>لینک‌های دانلود:</b>\n"
+        for link in download_links:
+            label = link.get("label", "دانلود")[:40]
+            href = link.get("url", "")
+            quality = link.get("quality", "")
+            btn_text = f"📥 {label}"
+            if quality:
+                btn_text += f" ({quality})"
+            btn_text = btn_text[:50]
+            if href:
+                builder.add(InlineKeyboardButton(text=btn_text, url=href))
+        builder.adjust(1)
+    else:
+        # Fallback: link to site page
+        header += "\n⚠ لینک‌های دانلود مستقیم دریافت نشد.\nبرای مشاهده همه لینک‌های دانلود به صفحه سایت بروید:"
+        if url:
+            builder.add(InlineKeyboardButton(text="🌐 صفحه دانلود در سایت", url=url))
+
     builder.add(InlineKeyboardButton(text="🏠 خانه", callback_data="menu:main"))
 
-    await callback.message.answer(text, reply_markup=builder.as_markup())
-    await callback.answer()
+    await callback.message.answer(header, reply_markup=builder.as_markup(), disable_web_page_preview=True)
