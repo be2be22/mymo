@@ -66,14 +66,13 @@ async def cb_detail(
         return
 
     wait_text = "⏳ در حال دریافت اطلاعات..."
-    try:
-        await callback.message.edit_text(wait_text)
-    except Exception:
-        pass
+    from telegram.safe_edit import safe_edit_message
+    await safe_edit_message(callback.message, wait_text)
 
     detail = await scraper_manager.get_content_detail(mymoviz_id, content_type_str)
     if not detail:
-        await callback.message.edit_text(
+        await safe_edit_message(
+            callback.message,
             "❌ اطلاعات این مورد دریافت نشد. ممکن است حذف شده باشد.",
             reply_markup=back_to_main_kb(),
         )
@@ -205,19 +204,35 @@ async def _render_detail(
     )
 
     poster_url = d.get("poster_url")
+    from telegram.safe_edit import safe_edit_message, safe_delete_message
     if poster_url:
-        try:
-            await message.delete()
-            await message.answer_photo(
-                photo=poster_url,
-                caption=text,
-                reply_markup=kb,
-            )
-        except Exception as exc:
-            logger.warning("Failed to send poster photo: {}", exc)
-            await message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+        # If current message is already a photo, edit its caption.
+        # Otherwise delete the text message and send a new photo.
+        if message.photo:
+            # Already a photo - just edit the caption and keyboard
+            try:
+                await message.edit_caption(caption=text, reply_markup=kb)
+            except Exception as exc:
+                logger.warning("edit_caption failed: {}", exc)
+                await safe_edit_message(message, text, reply_markup=kb)
+        else:
+            # Try to delete the text message and send a new photo
+            deleted = await safe_delete_message(message)
+            try:
+                await message.answer_photo(
+                    photo=poster_url,
+                    caption=text,
+                    reply_markup=kb,
+                )
+            except Exception as exc:
+                logger.warning("answer_photo failed (poster={}): {}", poster_url, exc)
+                # Fall back to text-only
+                from aiogram.types import Message as AiogramMessage
+                # If we deleted the original, we need a fresh message to answer
+                # message.answer() works on the chat, not the (deleted) message
+                await message.answer(text, reply_markup=kb, disable_web_page_preview=True)
     else:
-        await message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+        await safe_edit_message(message, text, reply_markup=kb)
 
 
 # ----------------------------------------------------------------------
@@ -316,7 +331,9 @@ async def cb_favorites_list(
     """Show the user's favorite list."""
     favs = await FavoriteRepository.list_by_user(session, db_user.id)
     if not favs:
-        await callback.message.edit_text(
+        from telegram.safe_edit import safe_edit_message
+        await safe_edit_message(
+            callback.message,
             "⭐ هنوز هیچ علاقه‌مندی‌ای ثبت نکرده‌اید.",
             reply_markup=back_to_main_kb(),
         )
@@ -342,8 +359,10 @@ async def cb_favorites_list(
                 }
             )
     from telegram.keyboards import favorites_list_kb
+    from telegram.safe_edit import safe_edit_message
     kb = await favorites_list_kb(items, session)
-    await callback.message.edit_text(
+    await safe_edit_message(
+        callback.message,
         f"⭐ <b>علاقه‌مندی‌های شما ({len(items)})</b>",
         reply_markup=kb,
     )
@@ -361,7 +380,9 @@ async def cb_subscriptions_list(
     subs = await SubscriptionRepository.list_by_user(session, db_user.id)
     active = [s for s in subs if s.is_active]
     if not active:
-        await callback.message.edit_text(
+        from telegram.safe_edit import safe_edit_message
+        await safe_edit_message(
+            callback.message,
             "🔔 هیچ اعلان فعالی ندارید.",
             reply_markup=back_to_main_kb(),
         )
@@ -387,8 +408,10 @@ async def cb_subscriptions_list(
                 }
             )
     from telegram.keyboards import subscriptions_list_kb
+    from telegram.safe_edit import safe_edit_message
     kb = await subscriptions_list_kb(items, session)
-    await callback.message.edit_text(
+    await safe_edit_message(
+        callback.message,
         f"🔔 <b>اعلان‌های فعال شما ({len(items)})</b>",
         reply_markup=kb,
     )
@@ -456,22 +479,53 @@ async def cb_download(callback: CallbackQuery, session: AsyncSession) -> None:
     builder = InlineKeyboardBuilder()
 
     if download_links:
-        # Show actual download links as buttons
-        header += "\n📋 <b>لینک‌های دانلود:</b>\n"
-        for link in download_links:
-            label = link.get("label", "دانلود")[:40]
-            href = link.get("url", "")
-            quality = link.get("quality", "")
-            btn_text = f"📥 {label}"
-            if quality:
-                btn_text += f" ({quality})"
-            btn_text = btn_text[:50]
-            if href:
-                builder.add(InlineKeyboardButton(text=btn_text, url=href))
+        # Show actual download links as buttons, grouped by type
+        # Separate watch online, downloads, and subtitles
+        watch_links = [l for l in download_links if "تماشای" in l.get("label", "")]
+        download_btns = [l for l in download_links if "تماشای" not in l.get("label", "")]
+        sub_links = [l for l in download_btns if "زیرنویس" in l.get("label", "")]
+        dl_links = [l for l in download_btns if "زیرنویس" not in l.get("label", "")]
+
+        if watch_links:
+            header += f"\n🎬 <b>تماشای آنلاین ({len(watch_links)} نسخه):</b>\n"
+            for link in watch_links[:5]:
+                label = link.get("label", "تماشای آنلاین")[:40]
+                href = link.get("url", "")
+                quality = link.get("quality", "")
+                btn_text = f"🎬 {label}"
+                if quality:
+                    btn_text += f" ({quality})"
+                btn_text = btn_text[:50]
+                if href:
+                    builder.add(InlineKeyboardButton(text=btn_text, url=href))
+
+        if dl_links:
+            header += f"\n📥 <b>دانلود ({len(dl_links)} نسخه):</b>\n"
+            for link in dl_links[:5]:
+                label = link.get("label", "دانلود")[:40]
+                href = link.get("url", "")
+                quality = link.get("quality", "")
+                btn_text = f"📥 {label}"
+                if quality:
+                    btn_text += f" ({quality})"
+                btn_text = btn_text[:50]
+                if href:
+                    builder.add(InlineKeyboardButton(text=btn_text, url=href))
+
+        if sub_links:
+            header += f"\n📝 <b>زیرنویس‌ها ({len(sub_links)}):</b>\n"
+            for link in sub_links[:3]:
+                label = link.get("label", "زیرنویس")[:40]
+                href = link.get("url", "")
+                btn_text = f"📝 {label}"[:50]
+                if href:
+                    builder.add(InlineKeyboardButton(text=btn_text, url=href))
+
+        header += "\n\n💡 برای دانلود مستقیم نیاز به اکانت ویژه MyMoviz دارید."
         builder.adjust(1)
     else:
         # Fallback: link to site page
-        header += "\n⚠ لینک‌های دانلود مستقیم دریافت نشد.\nبرای مشاهده همه لینک‌های دانلود به صفحه سایت بروید:"
+        header += "\n⚠ لینک‌های دانلود دریافت نشد.\nبرای مشاهده لینک‌های دانلود به صفحه سایت بروید:"
         if url:
             builder.add(InlineKeyboardButton(text="🌐 صفحه دانلود در سایت", url=url))
 

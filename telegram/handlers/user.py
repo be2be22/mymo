@@ -83,7 +83,8 @@ async def cb_main_menu(callback: CallbackQuery, session: AsyncSession, db_user: 
         f"⭐ علاقه‌مندی‌های شما: {fav_count}\n"
         f"🔔 اعلان‌های فعال شما: {sub_count}"
     )
-    await callback.message.edit_text(text, reply_markup=main_menu_kb())
+    from telegram.safe_edit import safe_edit_message
+    await safe_edit_message(callback.message, text, reply_markup=main_menu_kb())
     await callback.answer()
 
 
@@ -99,16 +100,17 @@ async def cb_about(callback: CallbackQuery) -> None:
         "🔄 بررسی خودکار: هر ۱۰ دقیقه\n\n"
         "این ربات به صورت متن‌باز توسعه داده شده است."
     )
-    await callback.message.edit_text(
-        about_text, reply_markup=back_to_main_kb(), disable_web_page_preview=True
-    )
+    from telegram.safe_edit import safe_edit_message
+    await safe_edit_message(callback.message, about_text, reply_markup=back_to_main_kb())
     await callback.answer()
 
 
 @router.callback_query(lambda c: c.data == "settings:menu")
 async def cb_settings_menu(callback: CallbackQuery) -> None:
     """Open settings menu."""
-    await callback.message.edit_text(
+    from telegram.safe_edit import safe_edit_message
+    await safe_edit_message(
+        callback.message,
         "⚙ <b>تنظیمات</b>\n\nیکی از گزینه‌ها را انتخاب کنید:",
         reply_markup=back_to_main_kb(),
     )
@@ -123,7 +125,8 @@ async def cb_admin_gate(callback: CallbackQuery) -> None:
         return
     # The actual admin handlers below will handle specific admin: callbacks.
     # If none of them matched, we just open the admin panel.
-    await callback.message.edit_text(
-        "🛠 <b>پنل مدیریت</b>", reply_markup=admin_panel_kb()
+    from telegram.safe_edit import safe_edit_message
+    await safe_edit_message(
+        callback.message, "🛠 <b>پنل مدیریت</b>", reply_markup=admin_panel_kb()
     )
     await callback.answer()

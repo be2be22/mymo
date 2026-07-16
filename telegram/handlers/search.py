@@ -39,7 +39,9 @@ class SearchStates(StatesGroup):
 async def cb_search_start(callback: CallbackQuery, state: FSMContext) -> None:
     """Prompt user to enter a search query."""
     await state.set_state(SearchStates.waiting_for_query)
-    await callback.message.edit_text(
+    from telegram.safe_edit import safe_edit_message
+    await safe_edit_message(
+        callback.message,
         "🔎 <b>جستجو</b>\n\n"
         "نام فیلم یا سریال را به فارسی یا انگلیسی وارد کنید:\n\n"
         "💡 می‌توانید فقط بخشی از نام را هم بنویسید.",
@@ -82,7 +84,9 @@ async def handle_search_query(
         results = await scraper_manager.search(query)
     except Exception as exc:
         logger.error("Search failed for '{}': {}", query, exc)
-        await wait_msg.edit_text(
+        from telegram.safe_edit import safe_edit_message
+        await safe_edit_message(
+            wait_msg,
             "❌ خطا در جستجو. لطفاً دوباره تلاش کنید یا نام دیگری وارد کنید.",
             reply_markup=cancel_kb(),
         )
@@ -90,7 +94,9 @@ async def handle_search_query(
 
     if not results:
         # Keep the state as waiting_for_query so user can search again
-        await wait_msg.edit_text(
+        from telegram.safe_edit import safe_edit_message
+        await safe_edit_message(
+            wait_msg,
             f"🔍 نتیجه‌ای برای «<b>{query}</b>» یافت نشد.\n"
             "💡 نام دیگری وارد کنید یا با نام انگلیسی امتحان کنید:",
             reply_markup=cancel_kb(),
@@ -135,10 +141,10 @@ async def _send_search_results(
     text = "\n".join(text_lines)[:4000]
 
     kb = await search_results_kb(items, session)
+    from telegram.safe_edit import safe_edit_message
     if wait_msg is not None:
-        try:
-            await wait_msg.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
-        except Exception:
+        success = await safe_edit_message(wait_msg, text, reply_markup=kb)
+        if not success:
             await message.answer(text, reply_markup=kb, disable_web_page_preview=True)
     else:
         await message.answer(text, reply_markup=kb, disable_web_page_preview=True)
@@ -148,8 +154,9 @@ async def _send_search_results(
 async def cb_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     """Cancel current operation."""
     await state.clear()
-    await callback.message.edit_text(
-        "❌ عملیات لغو شد.", reply_markup=back_to_main_kb()
+    from telegram.safe_edit import safe_edit_message
+    await safe_edit_message(
+        callback.message, "❌ عملیات لغو شد.", reply_markup=back_to_main_kb()
     )
     await callback.answer()
 

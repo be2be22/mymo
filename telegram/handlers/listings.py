@@ -12,6 +12,7 @@ from cache.cache_manager import cache
 from database.models import User
 from scrapers.manager import scraper_manager
 from telegram.keyboards import search_results_kb, back_to_main_kb
+from telegram.safe_edit import safe_edit_message
 from utils.formatters import format_search_result
 from utils.logger import get_logger
 
@@ -29,7 +30,8 @@ async def _show_listing(
 ) -> None:
     """Render a generic listing."""
     if not items:
-        await callback.message.edit_text(
+        await safe_edit_message(
+            callback.message,
             f"🔍 {title}یافت نشد.",
             reply_markup=back_to_main_kb(),
         )
@@ -43,9 +45,7 @@ async def _show_listing(
     text = "\n".join(lines)[:4000]
     await cache.set(cache_key, items)
     kb = await search_results_kb(items, session)
-    await callback.message.edit_text(
-        text, reply_markup=kb, disable_web_page_preview=True
-    )
+    await safe_edit_message(callback.message, text, reply_markup=kb)
     await callback.answer()
 
 
@@ -61,7 +61,8 @@ async def cb_list_movies(callback: CallbackQuery, session=None) -> None:
         results = await scraper_manager.get_latest_movies(limit=15)
     except Exception as exc:
         logger.error("list movies failed: {}", exc)
-        await callback.message.edit_text(
+        await safe_edit_message(
+            callback.message,
             "❌ خطا در دریافت فهرست فیلم‌ها.",
             reply_markup=back_to_main_kb(),
         )
@@ -95,7 +96,8 @@ async def cb_list_series(callback: CallbackQuery, session=None) -> None:
         results = await scraper_manager.get_latest_series(limit=15)
     except Exception as exc:
         logger.error("list series failed: {}", exc)
-        await callback.message.edit_text(
+        await safe_edit_message(
+            callback.message,
             "❌ خطا در دریافت فهرست سریال‌ها.",
             reply_markup=back_to_main_kb(),
         )
@@ -130,7 +132,8 @@ async def cb_list_latest(callback: CallbackQuery, session=None) -> None:
         series = await scraper_manager.get_latest_series(limit=10)
     except Exception as exc:
         logger.error("list latest failed: {}", exc)
-        await callback.message.edit_text(
+        await safe_edit_message(
+            callback.message,
             "❌ خطا در دریافت آخرین انتشارها.",
             reply_markup=back_to_main_kb(),
         )
@@ -165,7 +168,8 @@ async def cb_list_popular(callback: CallbackQuery, session=None) -> None:
         results = await scraper_manager.get_popular(limit=15)
     except Exception as exc:
         logger.error("list popular failed: {}", exc)
-        await callback.message.edit_text(
+        await safe_edit_message(
+            callback.message,
             "❌ خطا در دریافت محبوب‌ترین‌ها.",
             reply_markup=back_to_main_kb(),
         )
@@ -198,7 +202,8 @@ async def cb_downloads_status(
     subs = await SubscriptionRepository.list_by_user(session, db_user.id)
     active = [s for s in subs if s.is_active]
     if not active:
-        await callback.message.edit_text(
+        await safe_edit_message(
+            callback.message,
             "📊 <b>وضعیت دانلودها</b>\n\n"
             "شما هیچ اعلان فعالی ندارید.\n"
             "برای دنبال کردن وضعیت یک فیلم یا سریال، از صفحه آن گزینه «🔔 اطلاع بده» را بزنید.",
@@ -219,7 +224,8 @@ async def cb_downloads_status(
         elif sub.content_type == ContentType.SERIES and sub.series:
             title = sub.series.title_fa or sub.series.title_en or "—"
             text_lines.append(f"📺 {title}")
-    await callback.message.edit_text(
+    await safe_edit_message(
+        callback.message,
         "\n".join(text_lines),
         reply_markup=back_to_main_kb(),
     )

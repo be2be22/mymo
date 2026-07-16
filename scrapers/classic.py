@@ -349,15 +349,41 @@ class ClassicScraper(BaseScraper):
                         detail.title_fa = " ".join(fa_parts)
 
         # ----- Poster -----
-        # Poster is in the article header, usually with class containing cover
-        for img in soup.select("article.box-movie-details img, .box-movie-details-header img, img[data-src]"):
-            src = img.get("data-src") or img.get("src")
-            if src and "cover" in src and "tt" in src:
-                # Fix MyMoviz's weird /./ in path (e.g. /./images/ -> /images/)
-                src = src.replace("/./", "/")
-                detail.poster_url = self._make_absolute_url(src)
-                break
-        if not detail.poster_url:
+        # Try og:image meta tag FIRST - it's the most reliable source for the
+        # main poster. MyMoviz sets <meta property="og:image" content="..."/>
+        # with the correct poster URL for this specific movie/series.
+        poster_found = False
+        og_image = soup.select_one('meta[property="og:image"]')
+        if og_image:
+            content = og_image.get("content", "").strip()
+            if content:
+                content = content.replace("/./", "/")
+                detail.poster_url = self._make_absolute_url(content)
+                poster_found = True
+
+        # Fallback: find poster in article with watchlist-loading-<id> class
+        if not poster_found:
+            # Extract imdb_id from URL (e.g. tt903747 from /tvshows/tt903747/...)
+            imdb_id_match = re.search(r"(tt\d+)", url)
+            if imdb_id_match:
+                imdb_id = imdb_id_match.group(1)
+                # Look for article with watchlist-loading-<imdb_id> class
+                article_with_poster = soup.select_one(
+                    f"article.-watchlist-loading-{imdb_id.lstrip('t')}, "
+                    f"article[class*=-watchlist-loading-{imdb_id.lstrip('t')}]"
+                )
+                if article_with_poster:
+                    img = article_with_poster.find("img")
+                    if img:
+                        src = img.get("data-src") or img.get("src")
+                        if src:
+                            src = src.replace("/./", "/")
+                            detail.poster_url = self._make_absolute_url(src)
+                            poster_found = True
+
+        # Last resort: any img with "cover" in src (less reliable - may pick
+        # a related movie's poster from the "similar movies" sidebar)
+        if not poster_found:
             for img in soup.select("img[data-src]"):
                 src = img.get("data-src") or img.get("src")
                 if src and "cover" in src:
@@ -483,68 +509,100 @@ class ClassicScraper(BaseScraper):
         return detail
 
     def _parse_download_links(self, soup: BeautifulSoup) -> List[dict]:
-        """Extract actual download links from the detail page.
+        """Extract download links from the detail page.
 
-        MyMoviz puts download links inside section.box-movie-download.
-        Each quality/version has a row with one or more <a> tags pointing
-        to the actual file URL. When not logged in, the links point to
-        /signin?type=doLogin instead.
+        MyMoviz has TWO download sections:
+        1. "نسخه های قابل پخش آنلاین" (watch online versions) - links to /watch/...
+        2. "لینک های دانلود" (actual download links) - links to /panel/charge
+           (premium) or /subtitles/... (subtitle files)
+
+        We extract all useful links: watch online, subtitles, and download
+        links (even if they point to /panel/charge for non-premium users).
         """
         links: List[dict] = []
         seen_urls: set = set()
 
-        download_section = soup.select_one(
+        # Get ALL download sections (there are usually 2)
+        download_sections = soup.select(
             "section.box-movie-download, .box-movie-download, #download, .download-section"
         )
-        if not download_section:
-            return links
 
-        # Find all <a> tags with href that look like download links
-        for a in download_section.find_all("a", href=True):
-            href = a.get("href", "").strip()
-            if not href:
-                continue
-            # Skip login redirects and anchors
-            if href.startswith("#") or "/signin" in href or "javascript:" in href:
-                continue
-            # Make absolute
-            abs_url = self._make_absolute_url(href)
-            if abs_url in seen_urls:
-                continue
-            seen_urls.add(abs_url)
+        for download_section in download_sections:
+            # Find all <a> tags with href that look like download/watch/subtitle links
+            for a in download_section.find_all("a", href=True):
+                href = a.get("href", "").strip()
+                if not href:
+                    continue
+                # Skip anchors and javascript
+                if href.startswith("#") or "javascript:" in href:
+                    continue
+                # Skip external links like google.com/chrome
+                if href.startswith("https://www.google.com") or href.startswith("http://www.google.com"):
+                    continue
+                # Make absolute
+                abs_url = self._make_absolute_url(href)
+                if abs_url in seen_urls:
+                    continue
+                seen_urls.add(abs_url)
 
-            # Try to determine the label and quality from surrounding text
-            label_text = a.get_text(strip=True)
-            # Look at parent for context (quality, size, etc.)
-            parent = a.find_parent(["div", "li", "tr", "p"])
-            parent_text = parent.get_text(" ", strip=True) if parent else label_text
+                # Try to determine the label and quality from surrounding text
+                label_text = a.get_text(strip=True)
+                # Look at parent for context (quality, size, etc.)
+                parent = a.find_parent(["div", "li", "tr", "p"])
+                parent_text = parent.get_text(" ", strip=True) if parent else label_text
 
-            # Extract quality from text (e.g. "BluRay 1080p", "480p", "720p")
-            quality = ""
-            q_match = re.search(
-                r"(BluRay|WEB-DL|WEBRip|HDTV|HDRip|CAM|DVDScr)\s*(\d{3,4}p)?",
-                parent_text, re.I,
-            )
-            if q_match:
-                quality = q_match.group(0)
+                # Extract quality from text (e.g. "BluRay 1080p", "480p", "720p")
+                quality = ""
+                q_match = re.search(
+                    r"(BluRay|WEB-DL|WEBRip|HDTV|HDRip|CAM|DVDScr)\s*(\d{3,4}p)?",
+                    parent_text, re.I,
+                )
+                if q_match:
+                    quality = q_match.group(0)
+                else:
+                    # Try just resolution
+                    q_match2 = re.search(r"(\d{3,4}p)", parent_text)
+                    if q_match2:
+                        quality = q_match2.group(0)
 
-            # Determine label
-            if "دوبله" in parent_text or "Dubbed" in parent_text:
-                label = "دوبله فارسی"
-            elif "زیرنویس" in parent_text:
-                label = "زیرنویس"
-            elif label_text:
-                label = label_text[:40]
-            else:
-                label = "دانلود"
+                # Determine label and link type
+                if "/watch/" in href:
+                    # Watch online link
+                    label = "تماشای آنلاین"
+                    if "دوبله" in parent_text:
+                        label += " (دوبله)"
+                    elif "زبان اصلی" in parent_text:
+                        label += " (زبان اصلی)"
+                elif "/subtitles/" in href:
+                    # Subtitle link
+                    label = "زیرنویس"
+                    if "دوبله" in parent_text:
+                        label += " - دوبله"
+                    elif "کامل" in parent_text:
+                        label += " - کامل"
+                    elif "انگلیسی" in parent_text:
+                        label += " - انگلیسی"
+                elif "/panel/charge" in href:
+                    # Premium download link - requires paid account
+                    label = "دانلود"
+                    if "دوبله" in parent_text:
+                        label += " (دوبله)"
+                    elif "زبان اصلی" in parent_text:
+                        label += " (زبان اصلی)"
+                elif "دانلود" in parent_text or "download" in parent_text.lower():
+                    label = "دانلود"
+                elif label_text:
+                    label = label_text[:40]
+                else:
+                    label = "لینک"
 
-            links.append({
-                "label": label,
-                "url": abs_url,
-                "quality": quality,
-            })
+                links.append({
+                    "label": label,
+                    "url": abs_url,
+                    "quality": quality,
+                })
 
-        return links[:20]  # limit
+        return links[:25]  # limit
 
     def _extract_genres(self, soup: BeautifulSoup) -> Optional[str]:
         """Extract genre list from genre links."""
