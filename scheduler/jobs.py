@@ -44,7 +44,11 @@ _scheduler: Optional[AsyncIOScheduler] = None
 # Lifecycle
 # ----------------------------------------------------------------------
 def setup_scheduler() -> AsyncIOScheduler:
-    """Initialize the APScheduler and register the check job.
+    """Initialize the APScheduler and register jobs.
+
+    Jobs:
+    1. check_subscriptions - every 10 min, checks subscribed content for changes
+    2. check_new_content - every 60 min, posts new movies/series to channel
 
     The returned scheduler is NOT started here; the caller (main.py)
     starts it inside the running event loop.
@@ -59,8 +63,18 @@ def setup_scheduler() -> AsyncIOScheduler:
         max_instances=1,
         coalesce=True,
     )
+    _scheduler.add_job(
+        run_new_content_check,
+        trigger=IntervalTrigger(minutes=settings.new_content_check_interval_minutes),
+        id="check_new_content",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
     logger.info(
-        "Scheduler configured: every {} minute(s).", settings.check_interval_minutes
+        "Scheduler configured: subscriptions every {} min, new content every {} min",
+        settings.check_interval_minutes,
+        settings.new_content_check_interval_minutes,
     )
     return _scheduler
 
@@ -354,45 +368,11 @@ async def _dispatch_notifications(
         site_url=site_url or None,
     )
 
-    # Send to channels
+    # Notifications go ONLY to subscribed users (not to channel).
+    # The channel is used exclusively for posting NEW content (movies/series)
+    # via run_new_content_check, not for per-content change notifications.
     from main import bot  # late import to avoid circular
 
-    channel_ids = settings.channel_id_list
-    for channel in channel_ids:
-        try:
-            await bot.send_message(
-                chat_id=channel,
-                text=message_text,
-                disable_web_page_preview=True,
-            )
-            async with db_manager.session() as session:
-                await NotificationRepository.create(
-                    session,
-                    content_type=content_type,
-                    notification_type=notification_type,
-                    movie_id=movie_id,
-                    series_id=series_id,
-                    payload=payload_hash,
-                    channel=channel,
-                    success=True,
-                )
-            logger.info("Notification sent to channel {} for '{}'", channel, title)
-        except Exception as exc:
-            logger.warning("Failed to send to channel {}: {}", channel, exc)
-            async with db_manager.session() as session:
-                await NotificationRepository.create(
-                    session,
-                    content_type=content_type,
-                    notification_type=notification_type,
-                    movie_id=movie_id,
-                    series_id=series_id,
-                    payload=payload_hash,
-                    channel=channel,
-                    success=False,
-                    error_message=str(exc),
-                )
-
-    # Send to subscribed users
     try:
         async with db_manager.session() as session:
             subs = await SubscriptionRepository.list_by_user(
@@ -452,3 +432,162 @@ async def _dispatch_notifications(
             channel="users",
             success=True,
         )
+
+
+# ----------------------------------------------------------------------
+# New content check job - posts new movies/series to channel every hour
+# ----------------------------------------------------------------------
+async def run_new_content_check() -> None:
+    """Check for new movies/series and post them to the configured channel.
+
+    Uses the modern home page's "آخرین بروزرسانی فیلم ها" and
+    "سریال‌های به‌روز شده" sections to find new content.
+
+    Tracks the last posted content IDs in the cache to avoid reposting.
+    Only posts content that wasn't posted before.
+    """
+    logger.info("🆕 New content check: scanning modern home page...")
+    try:
+        from cache.cache_manager import cache
+        from scrapers.manager import scraper_manager
+        from main import bot
+        from config.settings import settings as cfg
+        from aiogram.types import InlineKeyboardButton
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+        # Fetch latest updates (10 movies + 10 series)
+        latest_movies, latest_series = await scraper_manager.get_latest_updates(limit=10)
+        logger.info(
+            "Found {} latest movies and {} latest series",
+            len(latest_movies), len(latest_series),
+        )
+
+        # Get previously posted IDs from cache
+        posted_key = "posted_content_ids"
+        posted = await cache.get(posted_key)
+        if posted is None:
+            posted = set()
+        else:
+            posted = set(posted)
+
+        # Get bot username for deep links
+        try:
+            bot_me = await bot.get_me()
+            bot_username = bot_me.username
+        except Exception:
+            bot_username = None
+
+        channel_ids = cfg.channel_id_list
+        if not channel_ids:
+            logger.warning("No channel IDs configured - skipping new content post")
+            return
+
+        new_items: list = []
+        # Combine movies and series, preserving order
+        for item in latest_movies + latest_series:
+            item_id = item.mymoviz_id
+            if not item_id:
+                continue
+            if item_id in posted:
+                continue
+            new_items.append(item)
+
+        if not new_items:
+            logger.info("No new content to post (all already posted)")
+            return
+
+        logger.info("Posting {} new items to channel(s)", len(new_items))
+
+        for item in new_items:
+            try:
+                await _post_content_to_channel(item, channel_ids, bot_username)
+                posted.add(item.mymoviz_id)
+                # Cache for 7 days (10080 minutes)
+                await cache.set(posted_key, list(posted), ttl=604800)
+                # Rate limit between posts
+                await asyncio.sleep(2)
+            except Exception as exc:
+                logger.warning("Failed to post item {} to channel: {}", item.mymoviz_id, exc)
+
+        logger.info("✅ New content check complete. Posted {} items.", len(new_items))
+    except Exception as exc:
+        logger.exception("New content check failed: {}", exc)
+
+
+async def _post_content_to_channel(item, channel_ids: list, bot_username: Optional[str]) -> None:
+    """Post a single content item to all configured channels.
+
+    Sends a photo with poster + info caption + 2 inline buttons:
+    - 🌐 مشاهده در سایت → opens the MyMoviz page
+    - 🎬 مشاهده در ربات → opens the bot with a deep link to the content
+    """
+    from main import bot
+    from aiogram.types import InlineKeyboardButton
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+    # Determine content type label
+    content_type_str = item.content_type or "movie"
+    icon = "🎬" if content_type_str == "movie" else "📺"
+    type_label = "فیلم" if content_type_str == "movie" else "سریال"
+
+    # Build caption
+    title_fa = item.title_fa or "—"
+    title_en = item.title_en or ""
+    year = item.year or ""
+    rating = item.imdb_rating
+    summary = getattr(item, "_summary", None) or ""
+    genres = getattr(item, "_genres", None) or ""
+    latest_ep = getattr(item, "_latest_episode", None) or ""
+
+    lines = [f"{icon} <b>{title_fa}</b>"]
+    if title_en:
+        lines.append(f"<i>{title_en}</i>")
+    lines.append("")
+    if year:
+        lines.append(f"📅 سال: {year}")
+    if rating:
+        lines.append(f"⭐ IMDb: {rating}")
+    if genres:
+        lines.append(f"🎭 ژانر: {genres}")
+    if latest_ep:
+        lines.append(f"🆕 آخرین قسمت: {latest_ep}")
+    lines.append(f"📦 نوع: {type_label}")
+    if summary:
+        # Truncate summary to keep caption under Telegram's 1024 char limit
+        summary = summary[:500]
+        lines.append("")
+        lines.append(f"📖 {summary}")
+
+    caption = "\n".join(lines)
+
+    # Build inline keyboard with 2 buttons
+    builder = InlineKeyboardBuilder()
+    if item.page_url:
+        builder.button(text="🌐 مشاهده در سایت", url=item.page_url)
+    if bot_username and item.mymoviz_id:
+        # Deep link to bot: https://t.me/<bot_username>?start=<content_id>
+        # The bot's /start handler will process this and show the detail page
+        deep_link = f"https://t.me/{bot_username}?start={item.mymoviz_id}"
+        builder.button(text="🎬 مشاهده در ربات", url=deep_link)
+    builder.adjust(1)
+
+    # Send to each channel
+    for channel_id in channel_ids:
+        try:
+            if item.poster_url:
+                await bot.send_photo(
+                    chat_id=channel_id,
+                    photo=item.poster_url,
+                    caption=caption,
+                    reply_markup=builder.as_markup(),
+                )
+            else:
+                await bot.send_message(
+                    chat_id=channel_id,
+                    text=caption,
+                    reply_markup=builder.as_markup(),
+                    disable_web_page_preview=True,
+                )
+            logger.info("Posted {} to channel {}", item.title_fa or item.title_en, channel_id)
+        except Exception as exc:
+            logger.warning("Failed to post to channel {}: {}", channel_id, exc)

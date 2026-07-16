@@ -303,6 +303,22 @@ async def cb_subscribe(
 
     movie = await MovieRepository.get_by_mymoviz_id(session, imdb_id)
     if movie:
+        # Check current state
+        already_active = await SubscriptionRepository.exists(
+            session, db_user.id, ContentType.MOVIE, movie_id=movie.id
+        )
+        if not already_active:
+            # Enforce max subscriptions limit
+            from config.settings import settings
+            current_subs = await SubscriptionRepository.list_by_user(session, db_user.id)
+            active_count = sum(1 for s in current_subs if s.is_active)
+            if active_count >= settings.max_subscriptions_per_user:
+                await callback.answer(
+                    f"❌ شما حداکثر {settings.max_subscriptions_per_user} اعلان می‌توانید داشته باشید.\n"
+                    "ابتدا یک اعلان را غیرفعال کنید.",
+                    show_alert=True,
+                )
+                return
         now_active = await SubscriptionRepository.toggle(
             session, db_user.id, ContentType.MOVIE, movie_id=movie.id
         )
@@ -312,6 +328,22 @@ async def cb_subscribe(
 
     series = await SeriesRepository.get_by_mymoviz_id(session, imdb_id)
     if series:
+        # Check current state
+        already_active = await SubscriptionRepository.exists(
+            session, db_user.id, ContentType.SERIES, series_id=series.id
+        )
+        if not already_active:
+            # Enforce max subscriptions limit
+            from config.settings import settings
+            current_subs = await SubscriptionRepository.list_by_user(session, db_user.id)
+            active_count = sum(1 for s in current_subs if s.is_active)
+            if active_count >= settings.max_subscriptions_per_user:
+                await callback.answer(
+                    f"❌ شما حداکثر {settings.max_subscriptions_per_user} اعلان می‌توانید داشته باشید.\n"
+                    "ابتدا یک اعلان را غیرفعال کنید.",
+                    show_alert=True,
+                )
+                return
         now_active = await SubscriptionRepository.toggle(
             session, db_user.id, ContentType.SERIES, series_id=series.id
         )
@@ -320,6 +352,85 @@ async def cb_subscribe(
         return
 
     await callback.answer("❌ ابتدا صفحه را باز کنید.", show_alert=True)
+
+
+# ----------------------------------------------------------------------
+# Unsubscribe callback: unsub:<short_id>
+# Deactivates the subscription for this content (does not delete it,
+# so user can re-enable later from the detail page).
+# ----------------------------------------------------------------------
+@router.callback_query(lambda c: c.data and c.data.startswith("unsub:"))
+async def cb_unsubscribe(
+    callback: CallbackQuery, session: AsyncSession, db_user: User
+) -> None:
+    """Deactivate subscription for a content item."""
+    short_id = callback.data[6:]
+    imdb_id = resolve_short_id(short_id)
+
+    movie = await MovieRepository.get_by_mymoviz_id(session, imdb_id)
+    if movie:
+        already_active = await SubscriptionRepository.exists(
+            session, db_user.id, ContentType.MOVIE, movie_id=movie.id
+        )
+        if already_active:
+            await SubscriptionRepository.toggle(
+                session, db_user.id, ContentType.MOVIE, movie_id=movie.id
+            )
+            await callback.answer("❌ اطلاع‌رسانی غیرفعال شد.")
+        else:
+            await callback.answer("این اعلان از قبل غیرفعال است.")
+        await _refresh_subscriptions_list(callback, session, db_user)
+        return
+
+    series = await SeriesRepository.get_by_mymoviz_id(session, imdb_id)
+    if series:
+        already_active = await SubscriptionRepository.exists(
+            session, db_user.id, ContentType.SERIES, series_id=series.id
+        )
+        if already_active:
+            await SubscriptionRepository.toggle(
+                session, db_user.id, ContentType.SERIES, series_id=series.id
+            )
+            await callback.answer("❌ اطلاع‌رسانی غیرفعال شد.")
+        else:
+            await callback.answer("این اعلان از قبل غیرفعال است.")
+        await _refresh_subscriptions_list(callback, session, db_user)
+        return
+
+    await callback.answer("❌ اعلانی یافت نشد.", show_alert=True)
+
+
+async def _refresh_subscriptions_list(
+    callback: CallbackQuery, session: AsyncSession, db_user: User
+) -> None:
+    """Refresh the subscriptions list message after a change."""
+    from telegram.keyboards import subscriptions_list_kb
+    subs = await SubscriptionRepository.list_by_user(session, db_user.id)
+    active = [s for s in subs if s.is_active]
+    if not active:
+        await safe_edit_message(
+            callback.message, "🔔 هیچ اعلان فعالی ندارید.", reply_markup=back_to_main_kb()
+        )
+        return
+    items: list[dict] = []
+    for sub in active:
+        if sub.content_type == ContentType.MOVIE and sub.movie:
+            items.append({
+                "content_type": "movie",
+                "mymoviz_id": sub.movie.mymoviz_id,
+                "title": sub.movie.title_fa or sub.movie.title_en or "—",
+            })
+        elif sub.content_type == ContentType.SERIES and sub.series:
+            items.append({
+                "content_type": "series",
+                "mymoviz_id": sub.series.mymoviz_id,
+                "title": sub.series.title_fa or sub.series.title_en or "—",
+            })
+    await safe_edit_message(
+        callback.message,
+        f"🔔 <b>اعلان‌های فعال شما ({len(items)})</b>",
+        reply_markup=subscriptions_list_kb(items),
+    )
 
 
 # ----------------------------------------------------------------------

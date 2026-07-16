@@ -80,6 +80,10 @@ class Settings(BaseSettings):
 
     # ---------- Scheduler ----------
     check_interval_minutes: int = Field(default=10, ge=1, le=1440)
+    # How often to check for new content (movies/series) and post to channel
+    new_content_check_interval_minutes: int = Field(default=60, ge=10, le=1440)
+    # Maximum active subscriptions per user
+    max_subscriptions_per_user: int = Field(default=5, ge=1, le=100)
 
     # ---------- Logging ----------
     log_level: str = Field(default="INFO")

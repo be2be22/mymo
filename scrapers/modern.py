@@ -99,6 +99,132 @@ class ModernScraper(BaseScraper):
         results = self._parse_modern_grid(soup)
         return results[:limit]
 
+    async def get_latest_updates(self, limit: int = 10) -> tuple[List[SearchResult], List[SearchResult]]:
+        """Fetch latest movie updates and latest series updates from modern home page.
+
+        Returns (latest_movies, latest_series) - each up to `limit` items.
+        Uses the two dedicated sections on the modern home page:
+        - "آخرین بروزرسانی فیلم ها" (latest movie updates)
+        - "سریال‌های به‌روز شده" (updated series)
+        """
+        try:
+            html = await self.http.get(self.modern_base)
+        except Exception as exc:
+            logger.warning("ModernScraper get_latest_updates failed: {}", exc)
+            return [], []
+
+        soup = BeautifulSoup(html, "lxml")
+        latest_movies: List[SearchResult] = []
+        latest_series: List[SearchResult] = []
+
+        # Find the mv-row__track sections
+        tracks = soup.select(".mv-row__track")
+        for track in tracks:
+            # Determine which section this is by looking at the parent's heading
+            section = track.find_parent("section")
+            if not section:
+                continue
+            heading = section.select_one("h2, h3, .mv-row__title")
+            if not heading:
+                continue
+            heading_text = heading.get_text(strip=True)
+
+            cards = track.select("a.mv-card")
+            for card in cards:
+                result = self._parse_modern_card_v2(card)
+                if result and (result.title_fa or result.title_en):
+                    if "فیلم" in heading_text:
+                        result.content_type = "movie"
+                        latest_movies.append(result)
+                    elif "سریال" in heading_text:
+                        result.content_type = "series"
+                        latest_series.append(result)
+
+        return latest_movies[:limit], latest_series[:limit]
+
+    def _parse_modern_card_v2(self, card) -> Optional[SearchResult]:
+        """Parse a modern mv-card element from the home page tracks."""
+        href = card.get("href", "")
+        data_guid = card.get("data-guid", "")
+
+        content_type = "movie"
+        # Check if it's a series (has mv-card__ep = episode info)
+        if card.select_one(".mv-card__ep"):
+            content_type = "series"
+
+        # Title
+        title_en_el = card.select_one(".mv-card__title")
+        title_en = title_en_el.get_text(strip=True) if title_en_el else None
+        title_fa_el = card.select_one(".mv-card__title-fa")
+        title_fa = title_fa_el.get_text(strip=True) if title_fa_el else None
+
+        # Poster
+        img = card.select_one(".mv-card__img")
+        poster = None
+        if img:
+            poster = img.get("data-src") or img.get("src")
+            if poster:
+                poster = poster.replace("/./", "/")
+
+        # Year
+        year = None
+        sub_el = card.select_one(".mv-card__sub")
+        if sub_el:
+            import re
+            m = re.search(r"(\d{4})", sub_el.get_text())
+            if m:
+                year = int(m.group(1))
+
+        # Rating (IMDb)
+        rating = None
+        rating_el = card.select_one(".mv-card__rate--imdb")
+        if rating_el:
+            import re
+            m = re.search(r"(\d+\.?\d*)", rating_el.get_text())
+            if m:
+                rating = float(m.group(1))
+
+        # Plot/summary
+        plot_el = card.select_one(".mv-card__plot")
+        summary = plot_el.get_text(strip=True) if plot_el else None
+
+        # Latest episode (for series)
+        latest_ep_el = card.select_one(".mv-card__ep")
+        latest_episode = latest_ep_el.get_text(strip=True) if latest_ep_el else None
+
+        # Genres
+        genres = []
+        for g in card.select(".mv-card__genre"):
+            t = g.get_text(strip=True)
+            if t:
+                genres.append(t)
+        genres_str = ", ".join(genres) if genres else None
+
+        # Build page_url and mymoviz_id
+        page_url = self._make_absolute_url(href) if href else None
+        mymoviz_id = data_guid or None
+        if href:
+            import re
+            m = re.search(r"/_modern/title/(\d+)", href)
+            if m:
+                mymoviz_id = m.group(1)
+
+        result = SearchResult(
+            title_fa=title_fa,
+            title_en=title_en,
+            year=year,
+            imdb_rating=rating,
+            content_type=content_type,
+            poster_url=self._make_absolute_url(poster) if poster else None,
+            page_url=page_url,
+            mymoviz_id=mymoviz_id,
+        )
+        # Stash extra info
+        result._summary = summary  # type: ignore[attr-defined]
+        result._latest_episode = latest_episode  # type: ignore[attr-defined]
+        result._genres = genres_str  # type: ignore[attr-defined]
+        return result
+
     # ------------------------------------------------------------------
     # Detail
     # ------------------------------------------------------------------

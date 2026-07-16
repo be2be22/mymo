@@ -166,38 +166,41 @@ async def cb_list_popular(callback: CallbackQuery) -> None:
 async def cb_downloads_status(
     callback: CallbackQuery, session: AsyncSession, db_user: User
 ) -> None:
-    """Show downloads status (placeholder: list user subscriptions)."""
+    """Downloads status removed - redirect to subscriptions list."""
     from database.models import ContentType
     from database.repositories import SubscriptionRepository
+    from telegram.keyboards import subscriptions_list_kb
 
     subs = await SubscriptionRepository.list_by_user(session, db_user.id)
     active = [s for s in subs if s.is_active]
     if not active:
         await safe_edit_message(
             callback.message,
-            "📊 <b>وضعیت دانلودها</b>\n\n"
+            "🔔 <b>اعلان‌های فعال شما</b>\n\n"
             "شما هیچ اعلان فعالی ندارید.\n"
             "برای دنبال کردن وضعیت یک فیلم یا سریال، از صفحه آن گزینه «🔔 اطلاع بده» را بزنید.",
             reply_markup=back_to_main_kb(),
         )
         await callback.answer()
         return
-    text_lines = [
-        "📊 <b>وضعیت دانلودها</b>",
-        "",
-        f"🔔 تعداد اعلان‌های فعال: {len(active)}",
-        "",
-    ]
+
+    items: list[dict] = []
     for sub in active:
         if sub.content_type == ContentType.MOVIE and sub.movie:
-            title = sub.movie.title_fa or sub.movie.title_en or "—"
-            text_lines.append(f"🎬 {title}")
+            items.append({
+                "content_type": "movie",
+                "mymoviz_id": sub.movie.mymoviz_id,
+                "title": sub.movie.title_fa or sub.movie.title_en or "—",
+            })
         elif sub.content_type == ContentType.SERIES and sub.series:
-            title = sub.series.title_fa or sub.series.title_en or "—"
-            text_lines.append(f"📺 {title}")
+            items.append({
+                "content_type": "series",
+                "mymoviz_id": sub.series.mymoviz_id,
+                "title": sub.series.title_fa or sub.series.title_en or "—",
+            })
     await safe_edit_message(
         callback.message,
-        "\n".join(text_lines),
-        reply_markup=back_to_main_kb(),
+        f"🔔 <b>اعلان‌های فعال شما ({len(items)})</b>",
+        reply_markup=subscriptions_list_kb(items),
     )
     await callback.answer()

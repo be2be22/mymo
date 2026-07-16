@@ -146,6 +146,38 @@ class ScraperManager:
             logger.error("Secondary get_popular also failed: {}", exc)
             return []
 
+    async def get_latest_updates(self, limit: int = 10) -> tuple[List[SearchResult], List[SearchResult]]:
+        """Fetch latest movie and series updates from the modern home page.
+
+        Returns (latest_movies, latest_series).
+        Falls back to get_latest_movies/get_latest_series if the modern
+        scraper doesn't support get_latest_updates.
+        """
+        # Try primary scraper
+        if hasattr(self._primary, "get_latest_updates"):
+            try:
+                movies, series = await self._primary.get_latest_updates(limit)
+                if movies or series:
+                    return movies, series
+            except Exception as exc:
+                logger.warning("Primary get_latest_updates error: {}", exc)
+        # Try secondary scraper
+        if hasattr(self._secondary, "get_latest_updates"):
+            try:
+                movies, series = await self._secondary.get_latest_updates(limit)
+                if movies or series:
+                    return movies, series
+            except Exception as exc:
+                logger.warning("Secondary get_latest_updates error: {}", exc)
+        # Fallback to the old methods
+        try:
+            movies = await self.get_latest_movies(limit)
+            series = await self.get_latest_series(limit)
+            return movies, series
+        except Exception as exc:
+            logger.error("get_latest_updates fallback failed: {}", exc)
+            return [], []
+
 
 # Module-level singleton
 scraper_manager = ScraperManager()

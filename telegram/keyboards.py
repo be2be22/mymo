@@ -62,7 +62,7 @@ def resolve_short_id(short_id: str) -> str:
 
 
 def main_menu_kb() -> InlineKeyboardMarkup:
-    """Glass-style main menu with 8 buttons in a 2-column grid."""
+    """Glass-style main menu - 7 buttons (removed settings and downloads status)."""
     builder = InlineKeyboardBuilder()
     buttons = [
         ("🔎 جستجو", "search:start"),
@@ -72,13 +72,11 @@ def main_menu_kb() -> InlineKeyboardMarkup:
         ("🔔 اطلاع‌رسانی‌ها", "subscriptions:list"),
         ("🕒 آخرین انتشارها", "list:latest"),
         ("🔥 محبوب‌ترین‌ها", "list:popular"),
-        ("📊 وضعیت دانلودها", "downloads:status"),
-        ("⚙ تنظیمات", "settings:menu"),
         ("ℹ درباره ربات", "about:show"),
     ]
     for text, callback in buttons:
         builder.button(text=text, callback_data=callback)
-    builder.adjust(2, 2, 2, 2, 2)
+    builder.adjust(2, 2, 2, 2)
     return builder.as_markup()
 
 
@@ -158,7 +156,12 @@ def favorites_list_kb(favorites: List[dict]) -> InlineKeyboardMarkup:
 
 
 def subscriptions_list_kb(subscriptions: List[dict]) -> InlineKeyboardMarkup:
-    """List of user subscriptions."""
+    """List of user subscriptions with deactivate buttons.
+
+    Each subscription shows two buttons:
+    - 📺 Title (click to view detail)
+    - ❌ غیرفعال کردن (click to deactivate this subscription)
+    """
     builder = InlineKeyboardBuilder()
     for sub in subscriptions[:15]:
         icon = "🎬" if sub.get("content_type") == "movie" else "📺"
@@ -166,7 +169,8 @@ def subscriptions_list_kb(subscriptions: List[dict]) -> InlineKeyboardMarkup:
         short = make_short_id(sub.get("mymoviz_id", ""))
         if short:
             builder.button(text=f"{icon} {title}"[:60], callback_data=f"d:{short}")
-    builder.adjust(1)
+            builder.button(text="❌ غیرفعال", callback_data=f"unsub:{short}")
+    builder.adjust(1, 1)  # detail button then deactivate button per row
     builder.button(text="🏠 خانه", callback_data="menu:main")
     return builder.as_markup()
 
