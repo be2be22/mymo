@@ -179,10 +179,12 @@ async def cb_force_check(callback: CallbackQuery) -> None:
         return
     await callback.answer("⏳ بررسی فوری شروع شد...", show_alert=False)
     try:
-        from scheduler.jobs import run_check_now
+        from scheduler.jobs import run_check_now, run_new_content_check
         await run_check_now()
+        await run_new_content_check()
         await callback.message.answer(
-            "✅ بررسی فوری انجام شد.", reply_markup=admin_panel_kb()
+            "✅ بررسی فوری انجام شد (اعلان‌ها + محتوای جدید).",
+            reply_markup=admin_panel_kb(),
         )
     except Exception as exc:
         logger.error("Force check failed: {}", exc)
