@@ -33,11 +33,13 @@ def setup_dispatcher(bot: Bot | None = None) -> Dispatcher:
     dp.update.outer_middleware(DatabaseMiddleware())
 
     # Register routers (order matters: more specific first)
+    # admin_router FIRST so its specific admin:stats, admin:broadcast, etc.
+    # handlers are matched before the generic admin:* gate in user_router.
+    dp.include_router(admin_router)
     dp.include_router(user_router)
     dp.include_router(search_router)
     dp.include_router(listings_router)
     dp.include_router(movie_router)
-    dp.include_router(admin_router)
 
     logger.info(
         "Dispatcher configured with {} routers.",

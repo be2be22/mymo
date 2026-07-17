@@ -45,7 +45,9 @@ async def cb_admin_panel(callback: CallbackQuery) -> None:
     if not callback.from_user or not is_admin(callback.from_user.id):
         await callback.answer("⛔ این بخش فقط برای ادمین است.", show_alert=True)
         return
-    await callback.message.edit_text(
+    from telegram.safe_edit import safe_edit_message
+    await safe_edit_message(
+        callback.message,
         "🛠 <b>پنل مدیریت</b>\n\nیکی از گزینه‌ها را انتخاب کنید:",
         reply_markup=admin_panel_kb(),
     )
@@ -71,12 +73,15 @@ async def cb_admin_stats(callback: CallbackQuery, session: AsyncSession) -> None
             "notifications": await NotificationRepository.count_all(session),
             "failed": await NotificationRepository.count_failed(session),
         }
-        await callback.message.edit_text(
-            format_admin_stats(stats), reply_markup=admin_panel_kb()
+        from telegram.safe_edit import safe_edit_message
+        await safe_edit_message(
+            callback.message, format_admin_stats(stats), reply_markup=admin_panel_kb()
         )
     except Exception as exc:
         logger.error("Admin stats failed: {}", exc)
-        await callback.message.edit_text(
+        from telegram.safe_edit import safe_edit_message
+        await safe_edit_message(
+            callback.message,
             f"❌ خطا در دریافت آمار: <code>{exc}</code>",
             reply_markup=admin_panel_kb(),
         )
@@ -93,7 +98,9 @@ async def cb_admin_broadcast_start(callback: CallbackQuery, state: FSMContext) -
         await callback.answer("⛔ این بخش فقط برای ادمین است.", show_alert=True)
         return
     await state.set_state(AdminStates.waiting_for_broadcast_text)
-    await callback.message.edit_text(
+    from telegram.safe_edit import safe_edit_message
+    await safe_edit_message(
+        callback.message,
         "📢 <b>ارسال پیام همگانی</b>\n\n"
         "متن پیام را ارسال کنید (HTML مجاز است):\n\n"
         "⚠ این پیام به همه کاربران فعال ارسال خواهد شد.",
@@ -147,7 +154,9 @@ async def cb_broadcast_confirm(
     user_ids = await UserRepository.list_active_ids(session)
     sent = 0
     failed = 0
-    await callback.message.edit_text(
+    from telegram.safe_edit import safe_edit_message
+    await safe_edit_message(
+        callback.message,
         f"⏳ در حال ارسال به {len(user_ids)} کاربر...", reply_markup=back_to_main_kb()
     )
     for uid in user_ids:
@@ -204,7 +213,9 @@ async def cb_clear_cache(callback: CallbackQuery) -> None:
         return
     n = await cache.cleanup_expired()
     await cache.clear()
-    await callback.message.edit_text(
+    from telegram.safe_edit import safe_edit_message
+    await safe_edit_message(
+        callback.message,
         f"🧹 کش پاک شد (تعداد موارد حذف‌شده: {n}).",
         reply_markup=admin_panel_kb(),
     )

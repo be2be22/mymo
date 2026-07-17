@@ -210,16 +210,16 @@ async def cb_about(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-@router.callback_query(lambda c: c.data and c.data.startswith("admin:"))
+@router.callback_query(lambda c: c.data == "admin:panel")
 async def cb_admin_gate(callback: CallbackQuery) -> None:
-    """Gate: only allow admin callbacks."""
+    """Open the admin panel (only matches admin:panel, not admin:stats etc.)."""
     if not callback.from_user or not is_admin(callback.from_user.id):
         await callback.answer("⛔ این بخش فقط برای ادمین است.", show_alert=True)
         return
-    # The actual admin handlers below will handle specific admin: callbacks.
-    # If none of them matched, we just open the admin panel.
     from telegram.safe_edit import safe_edit_message
     await safe_edit_message(
-        callback.message, "🛠 <b>پنل مدیریت</b>", reply_markup=admin_panel_kb()
+        callback.message,
+        "🛠 <b>پنل مدیریت</b>\n\nیکی از گزینه‌ها را انتخاب کنید:",
+        reply_markup=admin_panel_kb(),
     )
     await callback.answer()
