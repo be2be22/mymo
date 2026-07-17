@@ -55,6 +55,11 @@ bot: Bot = Bot(
 dp = setup_dispatcher(bot)
 scheduler = setup_scheduler()
 
+# Set the global bot instance so scheduler/jobs.py can access it without
+# importing main.py (which would cause a circular import / re-attach routers).
+from telegram.bot_instance import set_bot
+set_bot(bot)
+
 
 # ----------------------------------------------------------------------
 # Startup / Shutdown hooks

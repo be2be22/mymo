@@ -371,7 +371,7 @@ async def _dispatch_notifications(
     # Notifications go ONLY to subscribed users (not to channel).
     # The channel is used exclusively for posting NEW content (movies/series)
     # via run_new_content_check, not for per-content change notifications.
-    from main import bot  # late import to avoid circular
+    from telegram.bot_instance import get_bot; bot = get_bot()  # late import to avoid circular
 
     try:
         async with db_manager.session() as session:
@@ -450,7 +450,7 @@ async def run_new_content_check() -> None:
     try:
         from cache.cache_manager import cache
         from scrapers.manager import scraper_manager
-        from main import bot
+        from telegram.bot_instance import get_bot; bot = get_bot()
         from config.settings import settings as cfg
         from aiogram.types import InlineKeyboardButton
         from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -521,7 +521,7 @@ async def _post_content_to_channel(item, channel_ids: list, bot_username: Option
     - 🌐 مشاهده در سایت → opens the MyMoviz page
     - 🎬 مشاهده در ربات → opens the bot with a deep link to the content
     """
-    from main import bot
+    from telegram.bot_instance import get_bot; bot = get_bot()
     from aiogram.types import InlineKeyboardButton
     from aiogram.utils.keyboard import InlineKeyboardBuilder
 

@@ -117,13 +117,15 @@ async def handle_broadcast_text(
     if not message.text:
         await message.answer("❌ لطفاً متن ارسال کنید.")
         return
-    await state.update_data(broadcast_text=message.text)
+    # Store the broadcast text in state data and clear the FSM state
+    # so the callback handler (admin:broadcast_confirm) can read it.
+    # Note: state.clear() removes the state AND the data, so we must
+    # set the data AFTER clearing the state.
+    broadcast_text = message.text
     await state.clear()
-    await state.set_state(AdminStates.waiting_for_broadcast_text)
-    # Store the text in state data
-    await state.update_data(broadcast_text=message.text, awaiting_confirm=True)
+    await state.update_data(broadcast_text=broadcast_text)
     await message.answer(
-        f"📝 <b>پیش‌نمایش پیام:</b>\n\n{message.text}\n\n"
+        f"📝 <b>پیش‌نمایش پیام:</b>\n\n{broadcast_text}\n\n"
         "✅ برای ارسال به همه کاربران، روی «بله» بزنید.",
         reply_markup=confirm_kb(
             yes_callback="admin:broadcast_confirm",
@@ -149,7 +151,7 @@ async def cb_broadcast_confirm(
         return
 
     # Get bot instance from dispatcher
-    from main import bot  # late import to avoid circular
+    from telegram.bot_instance import get_bot; bot = get_bot()  # late import to avoid circular
 
     user_ids = await UserRepository.list_active_ids(session)
     sent = 0
