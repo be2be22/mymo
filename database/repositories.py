@@ -21,6 +21,7 @@ from database.models import (
     Movie,
     Notification,
     NotificationType,
+    PostedContent,
     Series,
     Subscription,
     User,
@@ -525,12 +526,56 @@ class CallbackMappingRepository:
         return result.rowcount or 0
 
 
+class PostedContentRepository:
+    """CRUD operations for :class:`PostedContent` - tracks what's been posted to channel."""
+
+    @staticmethod
+    async def is_posted(session: AsyncSession, mymoviz_id: str) -> bool:
+        """Check if a content item has already been posted to the channel."""
+        stmt = select(func.count(PostedContent.id)).where(
+            PostedContent.mymoviz_id == mymoviz_id
+        )
+        result = await session.execute(stmt)
+        return int(result.scalar_one()) > 0
+
+    @staticmethod
+    async def mark_posted(
+        session: AsyncSession,
+        mymoviz_id: str,
+        content_type: str = "movie",
+        title: Optional[str] = None,
+    ) -> None:
+        """Mark a content item as posted. Idempotent (safe to call multiple times)."""
+        # Check if already exists to avoid unique constraint violation
+        existing = await PostedContentRepository.is_posted(session, mymoviz_id)
+        if existing:
+            return
+        entry = PostedContent(
+            mymoviz_id=mymoviz_id,
+            content_type=content_type,
+            title=title,
+        )
+        session.add(entry)
+        try:
+            await session.flush()
+        except Exception:
+            await session.rollback()
+
+    @staticmethod
+    async def get_all_posted_ids(session: AsyncSession) -> set:
+        """Return a set of all posted mymoviz_ids."""
+        stmt = select(PostedContent.mymoviz_id)
+        result = await session.execute(stmt)
+        return {row[0] for row in result.all()}
+
+
 __all__ = [
     "CallbackMappingRepository",
     "EpisodeRepository",
     "FavoriteRepository",
     "MovieRepository",
     "NotificationRepository",
+    "PostedContentRepository",
     "SeriesRepository",
     "SubscriptionRepository",
     "UserRepository",

@@ -443,73 +443,78 @@ async def run_new_content_check() -> None:
     Uses the modern home page's "آخرین بروزرسانی فیلم ها" and
     "سریال‌های به‌روز شده" sections to find new content.
 
-    Tracks the last posted content IDs in the cache to avoid reposting.
-    Only posts content that wasn't posted before.
+    Tracks posted content IDs in the DATABASE (not cache) so it survives
+    bot restarts and redeploys. Only posts genuinely new content.
+    If no new content is found, nothing is posted.
     """
     logger.info("🆕 New content check: scanning modern home page...")
     try:
-        from cache.cache_manager import cache
         from scrapers.manager import scraper_manager
         from telegram.bot_instance import get_bot; bot = get_bot()
         from config.settings import settings as cfg
-        from aiogram.types import InlineKeyboardButton
-        from aiogram.utils.keyboard import InlineKeyboardBuilder
+        from database.repositories import PostedContentRepository
 
         # Fetch latest updates (10 movies + 10 series)
         latest_movies, latest_series = await scraper_manager.get_latest_updates(limit=10)
         logger.info(
-            "Found {} latest movies and {} latest series",
+            "Found {} latest movies and {} latest series on home page",
             len(latest_movies), len(latest_series),
         )
 
-        # Get previously posted IDs from cache
-        posted_key = "posted_content_ids"
-        posted = await cache.get(posted_key)
-        if posted is None:
-            posted = set()
-        else:
-            posted = set(posted)
+        # Get ALL previously posted IDs from database (survives restarts)
+        async with db_manager.session() as session:
+            posted_ids = await PostedContentRepository.get_all_posted_ids(session)
+
+        logger.info("Previously posted content count: {}", len(posted_ids))
+
+        # Filter to only genuinely new items
+        new_items: list = []
+        for item in latest_movies + latest_series:
+            item_id = item.mymoviz_id
+            if not item_id:
+                continue
+            if item_id in posted_ids:
+                continue
+            new_items.append(item)
+
+        if not new_items:
+            logger.info("✅ No new content to post (all items already posted). Skipping channel post.")
+            return
+
+        logger.info("Found {} genuinely new items to post", len(new_items))
 
         # Get bot username for deep links
+        bot_username = None
         try:
             bot_me = await bot.get_me()
             bot_username = bot_me.username
         except Exception:
-            bot_username = None
+            pass
 
         channel_ids = cfg.channel_id_list
         if not channel_ids:
             logger.warning("No channel IDs configured - skipping new content post")
             return
 
-        new_items: list = []
-        # Combine movies and series, preserving order
-        for item in latest_movies + latest_series:
-            item_id = item.mymoviz_id
-            if not item_id:
-                continue
-            if item_id in posted:
-                continue
-            new_items.append(item)
-
-        if not new_items:
-            logger.info("No new content to post (all already posted)")
-            return
-
-        logger.info("Posting {} new items to channel(s)", len(new_items))
-
+        posted_count = 0
         for item in new_items:
             try:
                 await _post_content_to_channel(item, channel_ids, bot_username)
-                posted.add(item.mymoviz_id)
-                # Cache for 7 days (10080 minutes)
-                await cache.set(posted_key, list(posted), ttl=604800)
-                # Rate limit between posts
-                await asyncio.sleep(2)
+                # Mark as posted in DATABASE immediately after successful post
+                async with db_manager.session() as session:
+                    await PostedContentRepository.mark_posted(
+                        session,
+                        mymoviz_id=item.mymoviz_id,
+                        content_type=item.content_type or "movie",
+                        title=item.title_fa or item.title_en,
+                    )
+                posted_count += 1
+                # Rate limit between posts (avoid Telegram flood control)
+                await asyncio.sleep(3)
             except Exception as exc:
                 logger.warning("Failed to post item {} to channel: {}", item.mymoviz_id, exc)
 
-        logger.info("✅ New content check complete. Posted {} items.", len(new_items))
+        logger.info("✅ New content check complete. Posted {} new items.", posted_count)
     except Exception as exc:
         logger.exception("New content check failed: {}", exc)
 

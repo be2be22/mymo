@@ -285,3 +285,23 @@ class CallbackMapping(Base):
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"<CallbackMapping(short={self.short_key}, type={self.content_type})>"
+
+
+class PostedContent(Base):
+    """Tracks content that has been posted to the channel.
+
+    Used by the hourly new-content check to avoid reposting the same
+    movies/series. Stored in the database (not cache) so it survives
+    bot restarts and redeploys.
+    """
+
+    __tablename__ = "posted_content"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    mymoviz_id: Mapped[str] = mapped_column(String(128), unique=True, index=True, nullable=False)
+    content_type: Mapped[str] = mapped_column(String(20), nullable=False, default="movie")
+    title: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    posted_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<PostedContent(id={self.mymoviz_id}, title={self.title})>"
